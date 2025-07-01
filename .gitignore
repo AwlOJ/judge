@@ -21,6 +21,7 @@ yarn-error.log*
 *.rpm
 *.deb
 *.bin
+bin
 
 # Test binary, can be achieved by `go test -c`
 *-test
