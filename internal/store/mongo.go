@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -13,13 +15,16 @@ import (
 // Submission represents a user's code submission.
 // This struct should match the 'submissions' collection schema.
 type Submission struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty"`
-	UserID    primitive.ObjectID `bson:"userId"`
-	ProblemID primitive.ObjectID `bson:"problemId"`
-	Code      string             `bson:"code"`
-	Language  string             `bson:"language"`
-	Status    string             `bson:"status"` // e.g., "In Queue", "Judging", "Accepted", "Wrong Answer"
-	// Add other fields like executionTime, memoryUsed later
+	ID            primitive.ObjectID `bson:"_id,omitempty"`
+	UserID        primitive.ObjectID `bson:"userId"`
+	ProblemID     primitive.ObjectID `bson:"problemId"`
+	Code          string             `bson:"code"`
+	Language      string             `bson:"language"`
+	Status        string             `bson:"status"` // e.g., "In Queue", "Judging", "Accepted", "Wrong Answer", "Compilation Error", "Runtime Error", "Time Limit Exceeded", "Memory Limit Exceeded", "Internal Error"
+	ExecutionTime int64              `bson:"executionTime,omitempty"` // in milliseconds
+	MemoryUsed    int64              `bson:"memoryUsed,omitempty"`    // in kilobytes
+	CreatedAt     time.Time          `bson:"createdAt"`
+	UpdatedAt     time.Time          `bson:"updatedAt"`
 }
 
 // Problem represents a problem definition.
@@ -31,7 +36,6 @@ type Problem struct {
 	TimeLimit   int                `bson:"timeLimit"`   // in seconds
 	MemoryLimit int                `bson:"memoryLimit"` // in megabytes
 	TestCases   []TestCase         `bson:"testCases"`
-	// Add other problem details later
 }
 
 // TestCase represents a single test case for a problem.
@@ -79,17 +83,88 @@ func (s *Store) Close(ctx context.Context) error {
 
 // FetchSubmission retrieves a submission document by its ID.
 func (s *Store) FetchSubmission(ctx context.Context, submissionID string) (*Submission, error) {
-	log.Printf("Fetching submission with ID: %s (placeholder)", submissionID)
-	// --- Implement actual MongoDB query here ---
-	// For now, return a dummy submission or an error
-	return nil, fmt.Errorf("FetchSubmission not implemented yet")
+	objID, err := primitive.ObjectIDFromHex(submissionID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid submission ID format: %w", err)
+	}
+
+	collection := s.Client.Database(s.DatabaseName).Collection("submissions")
+	var submission Submission
+	err = collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&submission)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("submission with ID %s not found", submissionID)
+		}
+		return nil, fmt.Errorf("failed to fetch submission %s: %w", submissionID, err)
+	}
+	return &submission, nil
 }
 
 // FetchProblem retrieves a problem document by its ID.
-// We will implement the actual database query here later.
 func (s *Store) FetchProblem(ctx context.Context, problemID string) (*Problem, error) {
-	log.Printf("Fetching problem with ID: %s (placeholder)", problemID)
-	// --- Implement actual MongoDB query here ---
-	// For now, return a dummy problem or an error
-	return nil, fmt.Errorf("FetchProblem not implemented yet")
+	objID, err := primitive.ObjectIDFromHex(problemID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid problem ID format: %w", err)
+	}
+
+	collection := s.Client.Database(s.DatabaseName).Collection("problems")
+	var problem Problem
+	err = collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&problem)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("problem with ID %s not found", problemID)
+		}
+		return nil, fmt.Errorf("failed to fetch problem %s: %w", problemID, err)
+	}
+	return &problem, nil
+}
+
+// UpdateSubmissionStatus updates the status of a submission.
+func (s *Store) UpdateSubmissionStatus(ctx context.Context, submissionID string, status string) error {
+	objID, err := primitive.ObjectIDFromHex(submissionID)
+	if err != nil {
+		return fmt.Errorf("invalid submission ID format: %w", err)
+	}
+
+	collection := s.Client.Database(s.DatabaseName).Collection("submissions")
+	filter := bson.M{"_id": objID}
+	update := bson.M{
+		"$set": bson.M{
+			"status":    status,
+			"updatedAt": time.Now(),
+		},
+	}
+
+	_, err = collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to update status for submission %s: %w", submissionID, err)
+	}
+	log.Printf("Submission %s status updated to: %s", submissionID, status)
+	return nil
+}
+
+// UpdateSubmissionResult updates the status, execution time, and memory usage of a submission.
+func (s *Store) UpdateSubmissionResult(ctx context.Context, submissionID string, status string, execTimeMs int64, memoryUsedKb int64) error {
+	objID, err := primitive.ObjectIDFromHex(submissionID)
+	if err != nil {
+		return fmt.Errorf("invalid submission ID format: %w", err)
+	}
+
+	collection := s.Client.Database(s.DatabaseName).Collection("submissions")
+	filter := bson.M{"_id": objID}
+	update := bson.M{
+		"$set": bson.M{
+			"status":        status,
+			"executionTime": execTimeMs,
+			"memoryUsed":    memoryUsedKb,
+			"updatedAt":     time.Now(),
+		},
+	}
+
+	_, err = collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to update result for submission %s: %w", submissionID, err)
+	}
+	log.Printf("Submission %s result updated to: %s (Time: %dms, Memory: %dKB)", submissionID, status, execTimeMs, memoryUsedKb)
+	return nil
 }

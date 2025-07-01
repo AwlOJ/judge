@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"strings" // Added missing import
 
 	"judge-service/internal/queue"
 	"judge-service/internal/runner"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"judge-service/internal/core"
+	"errors"
 )
 
 func main() {
@@ -56,16 +58,16 @@ func main() {
 
 	// --- Connect to MongoDB ---
 	log.Printf("Connecting to MongoDB...")
-	store, err := store.NewStore(ctx, mongoURI, mongoDBName)
+	storeInstance, err := store.NewStore(ctx, mongoURI, mongoDBName)
 	if err != nil {
 		log.Fatalf("Could not connect to MongoDB: %v", err)
 	}
-	defer store.Close(ctx) // Ensure MongoDB connection is closed on exit
+	defer storeInstance.Close(ctx) // Ensure MongoDB connection is closed on exit
 
 	log.Println("Successfully connected to MongoDB.")
 
 	// --- Create Runner ---
-	runner := runner.NewRunner()
+	runnerInstance := runner.NewRunner()
 
 	// --- Create and Start Queue Consumer ---
 	consumer := queue.NewConsumer(rdb, queueName)
@@ -74,84 +76,118 @@ func main() {
 	jobHandler := func(ctx context.Context, job *queue.JobPayload) error {
 		log.Printf("Handling job for submission ID: %s", job.SubmissionID)
 
-		// --- Actual Judging Logic Starts Here ---
-
-		// 1. Fetching data from MongoDB
-		submission, err := store.FetchSubmission(ctx, job.SubmissionID)
-		if err != nil {
-			log.Printf("Error fetching submission %s: %v", job.SubmissionID, err)
-			// TODO: Update submission status to indicate error
-			return err // Propagate error so consumer can potentially handle retries
-		}
-		log.Printf("Fetched submission for problem ID: %s", submission.ProblemID.Hex())
-
-		problem, err := store.FetchProblem(ctx, submission.ProblemID.Hex())
-		if err != nil {
-			log.Printf("Error fetching problem %s for submission %s: %v", submission.ProblemID.Hex(), job.SubmissionID, err)
-			// TODO: Update submission status to indicate error
-			return err // Propagate error
-		}
-		log.Printf("Fetched problem: %s", problem.Title)
-
-		// Defer cleanup of the temporary environment
+		// Defer cleanup of the temporary environment immediately
 		var tempDir string
 		defer func() {
 			if tempDir != "" {
-				if cleanupErr := runner.CleanupEnvironment(tempDir); cleanupErr != nil {
+				if cleanupErr := runnerInstance.CleanupEnvironment(tempDir); cleanupErr != nil {
 					log.Printf("Error cleaning up temp directory %s: %v", tempDir, cleanupErr)
 				}
 			}
 		}()
 
+		// Initial status update - Judging
+		updateStatus := func(status string) {
+			if updateErr := storeInstance.UpdateSubmissionStatus(ctx, job.SubmissionID, status); updateErr != nil {
+				log.Printf("Failed to update submission %s status to %s: %v", job.SubmissionID, status, updateErr)
+			}
+		}
+		updateResult := func(status string, execTimeMs, memoryUsedKb int64) {
+			if updateErr := storeInstance.UpdateSubmissionResult(ctx, job.SubmissionID, status, execTimeMs, memoryUsedKb); updateErr != nil {
+				log.Printf("Failed to update submission %s result to %s: %v", job.SubmissionID, status, updateErr)
+			}
+		}
+
+		updateStatus("Judging")
+
+		// --- Actual Judging Logic Starts Here ---
+
+		// 1. Fetching data from MongoDB
+		submission, err := storeInstance.FetchSubmission(ctx, job.SubmissionID)
+		if err != nil {
+			log.Printf("Error fetching submission %s: %v", job.SubmissionID, err)
+			updateStatus("Internal Error") // Update status on fetch error
+			return nil // Do not retry this job if data fetching failed
+		}
+		log.Printf("Fetched submission for problem ID: %s", submission.ProblemID.Hex())
+
+		problem, err := storeInstance.FetchProblem(ctx, submission.ProblemID.Hex())
+		if err != nil {
+			log.Printf("Error fetching problem %s for submission %s: %v", submission.ProblemID.Hex(), job.SubmissionID, err)
+			updateStatus("Internal Error") // Update status on fetch error
+			return nil // Do not retry this job
+		}
+		log.Printf("Fetched problem: %s", problem.Title)
+
+
 		// 2. Preparing the environment
-		tempDir, err = runner.PrepareEnvironment(job.SubmissionID, submission.Code, problem.TestCases)
+		tempDir, err = runnerInstance.PrepareEnvironment(job.SubmissionID, submission.Code, problem.TestCases, submission.Language)
 		if err != nil {
 			log.Printf("Error preparing environment for submission %s: %v", job.SubmissionID, err)
-			// TODO: Update submission status to indicate error
-			return err // Propagate error
+			updateStatus("Internal Error")
+			return nil // Do not retry
 		}
 		log.Printf("Environment prepared in %s", tempDir)
 
 		// 3. Compile the code
-		executablePath, compileErr := runner.Compile(ctx, job.SubmissionID, submission.Language, tempDir)
+		executablePath, compileErr := runnerInstance.Compile(ctx, job.SubmissionID, submission.Language, tempDir)
 		if compileErr != nil {
 			log.Printf("Compilation failed for submission %s: %v", job.SubmissionID, compileErr)
-			// TODO: Update submission status to Compilation Error
+			updateResult("Compilation Error", 0, 0) // Update with 0 time/memory
 			return nil // Do not retry on compilation errors, just report and finish
 		}
 		log.Printf("Compilation successful. Executable: %s", executablePath)
 
-		// 4. Execute against test cases and Judge (placeholder for internal/core)
-		// This loop will be replaced by a call to the core judging engine later
-		log.Println("Executing test cases (placeholder)...")
+		// 4. Execute against test cases and Judge
+		var finalStatus = "Accepted"
+		var totalExecTimeMs int64 = 0
+		var maxMemoryUsedKb int64 = 0
+
 		for i, testCase := range problem.TestCases {
-			log.Printf("Running test case %d...", i)
-			// Simulate execution and get results
-			output, _, _, runtimeErr := runner.Execute(ctx, job.SubmissionID, submission.Language, executablePath, &testCase, problem.TimeLimit, problem.MemoryLimit, tempDir)
+			log.Printf("Running test case %d for submission %s...", i, job.SubmissionID)
+
+			output, executionTimeMs, memoryUsedKb, runtimeErr := runnerInstance.Execute(
+				ctx, job.SubmissionID, submission.Language, executablePath, &testCase,
+				problem.TimeLimit, problem.MemoryLimit, tempDir,
+			)
+
+			// Aggregate total execution time and max memory used
+			totalExecTimeMs += int64(executionTimeMs)
+			if int64(memoryUsedKb) > maxMemoryUsedKb {
+				maxMemoryUsedKb = int64(memoryUsedKb)
+			}
+
 			if runtimeErr != nil {
-				log.Printf("Runtime error on test case %d for submission %s: %v", i, job.SubmissionID, runtimeErr)
-				// TODO: Update submission status to Runtime Error and break loop
-				break
-			}
-				// Compare output using internal/core/engine
-				if core.CompareOutputs(output, testCase.Output) {
-					log.Printf("Test case %d for submission %s: Accepted", i, job.SubmissionID)
-					// TODO: Update submission result to Accepted
+				// Check for specific runtime error types
+				if errors.Is(runtimeErr, context.DeadlineExceeded) || strings.Contains(runtimeErr.Error(), "Time Limit Exceeded") {
+					finalStatus = "Time Limit Exceeded"
+				} else if strings.Contains(runtimeErr.Error(), "Memory Limit Exceeded") {
+					finalStatus = "Memory Limit Exceeded"
 				} else {
-					log.Printf("Test case %d for submission %s: Wrong Answer", i, job.SubmissionID)
-					// TODO: Update submission result to Wrong Answer and break the loop
-					break
+					finalStatus = "Runtime Error"
 				}
+				log.Printf("Submission %s - Test case %d: %s (Error: %v)", job.SubmissionID, i, finalStatus, runtimeErr)
+				break // Stop on first error
 			}
 
+			// Compare output using internal/core/engine
+			if core.CompareOutputs(output, testCase.Output) {
+				log.Printf("Submission %s - Test case %d: Accepted", job.SubmissionID, i)
+			} else {
+				log.Printf("Submission %s - Test case %d: Wrong Answer", job.SubmissionID, i)
+				finalStatus = "Wrong Answer"
+				break // Stop on first wrong answer
+			}
+		}
 
-			// 5. Updating submission status/result in MongoDB (using internal/store)
-			// This will be done after the actual judging logic determines the final verdict
+		// 5. Updating submission status/result in MongoDB
+		log.Printf("Finalizing submission %s with status: %s, Time: %dms, Memory: %dKB", job.SubmissionID, finalStatus, totalExecTimeMs, maxMemoryUsedKb)
+		updateResult(finalStatus, totalExecTimeMs, maxMemoryUsedKb)
 
-		// --- End of Judging Logic --- 
+		// --- End of Judging Logic ---
 
 		log.Printf("Finished handling job for submission ID: %s", job.SubmissionID)
-		return nil // Indicate successful processing for now
+		return nil // Indicate successful processing
 	}
 
 	// Use a goroutine to start the consumer so main can listen for signals

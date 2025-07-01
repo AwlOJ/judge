@@ -40,14 +40,14 @@ func NewRunner() *Runner {
 			"cpp": {
 				Image:              "gcc:latest",
 				CompileCmd:         []string{"g++", "/workspace/main.cpp", "-o", "/workspace/main.out", "-O2", "-static", "-Wall"},
-				RunCmd:             []string{"/workspace/main.out"},
+				RunCmd:             []string{"/workspace/main.out"}, // Just the executable
 				SourceFileName:     "main.cpp",
 				ExecutableFileName: "main.out",
 			},
 			"python": {
 				Image:              "python:latest",
 				CompileCmd:         nil, // Python is interpreted, no compile step
-				RunCmd:             []string{"python3", "/workspace/main.py"},
+				RunCmd:             []string{"python3", "/workspace/main.py"}, // Just the interpreter and script
 				SourceFileName:     "main.py",
 				ExecutableFileName: "", // Not applicable for interpreted languages
 			},
@@ -122,8 +122,8 @@ func (r *Runner) Compile(ctx context.Context, submissionID string, lang string, 
 
 // Execute runs the compiled code against a single test case in a Docker container.
 // It returns the output, execution time, memory usage, and any runtime error.
-func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, executableRelativePath string, testCase *store.TestCase, timeLimit int, memoryLimit int, tempDir string) (output string, executionTimeMs int, memoryUsedMb int, runtimeErr error) {
-	log.Printf("Executing submission %s (lang: %s) against test case (TimeLimit: %ds, MemoryLimit: %dMB)", submissionID, timeLimit, memoryLimit)
+func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, executableRelativePath string, testCase *store.TestCase, timeLimit int, memoryLimit int, tempDir string) (output string, executionTimeMs int, memoryUsedKb int, runtimeErr error) {
+	log.Printf("Executing submission %s (lang: %s) against test case (TimeLimit: %ds, MemoryLimit: %dMB)", submissionID, lang, timeLimit, memoryLimit)
 
 	config, ok := r.LangConfig[lang]
 	if !ok {
@@ -142,39 +142,34 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 	// Ensure the temp input file is removed after execution
 	defer os.Remove(inputFilePath)
 
-	// Prepare the expected output file in the temp directory (optional, for easier debugging/comparison)
-	// outputFilePath := filepath.Join(tempDir, "expected_output.txt")
-	// if err := os.WriteFile(outputFilePath, []byte(testCase.Output), 0644); err != nil {
-	// 	log.Printf("Warning: failed to write expected output file: %v", err)
-	// }
-	// defer os.Remove(outputFilePath)
-
 	// --- Build the Docker command for execution ---
 	// docker run --rm --network=none --cpus="1.0" --memory="512m" -v <tempDir>:/workspace <image> <run_command...> < /workspace/input.txt > /workspace/output.txt
 	args := []string{
 		"run", "--rm", // Remove container after exit
 		"--network=none",                            // No network access
-		fmt.Sprintf("--cpus=%f", float64(1.0)), // Limit CPU usage to 1 core
-		fmt.Sprintf("--memory=%dm", memoryLimit), // Limit memory usage (in MB)
+		fmt.Sprintf("--cpus=%f", float64(1.0)),      // Limit CPU usage to 1 core
+		fmt.Sprintf("--memory=%dm", memoryLimit),    // Limit memory usage (in MB)
 		"-v", fmt.Sprintf("%s:/workspace", tempDir), // Mount temp directory
 		config.Image, // Docker image
 	}
 
-	// Append the actual run command, piping input and output within the container
-	// The input is read from the mounted input.txt, and output is written to the mounted output.txt
-	// Note: The exact command might vary slightly based on language/image, but this is a common pattern.
-	runCmdWithRedirects := append(config.RunCmd, "<", workspaceInputPath, ">", workspaceOutputPath)
-	args = append(args, runCmdWithRedirects...)
+	// Construct the shell command to run the executable with input/output redirection
+	// Example: /workspace/main.out < /workspace/input.txt > /workspace/output.txt
+	runCommand := strings.Join(config.RunCmd, " ") // Join parts of the run command
+	shellCmd := fmt.Sprintf("timeout %ds %s < %s > %s 2> %s", timeLimit, runCommand, workspaceInputPath, workspaceOutputPath, "/workspace/stderr.txt") // Add stderr redirect
+	args = append(args, "bash", "-c", shellCmd)
 
 	// Add a timeout to the context for this execution
-	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeLimit)*time.Second)
+	// The `timeout` command inside the container handles TLE, but outer context ensures overall process doesn't hang
+	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeLimit+5)*time.Second) // A bit more than problem time limit
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, "docker", args...)
 
-	// Capture stderr (for runtime errors)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// We redirect stderr of the user program inside the container to stderr.txt
+	// For the docker command itself, we might still want to capture its stderr
+	var dockerStderr bytes.Buffer
+	cmd.Stderr = &dockerStderr // Captures stderr of the 'docker' command
 
 	log.Printf("Running execution command: docker %s", strings.Join(args, " "))
 
@@ -183,32 +178,37 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 	err := cmd.Run()
 	executionTimeMs = int(time.Since(startTime).Milliseconds())
 
+	// Read stderr from within the container
+	stderrFilePath := filepath.Join(tempDir, "stderr.txt")
+	userProgramStderrBytes, _ := os.ReadFile(stderrFilePath)
+	defer os.Remove(stderrFilePath)
+	userProgramStderr := strings.TrimSpace(string(userProgramStderrBytes))
+
+
 	// --- Handle Execution Results ---
-	// Default status is successful execution
 	runtimeErr = nil
 
 	if err != nil {
-		// Check if the error is due to timeout
-		if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
-			log.Printf("Execution timed out for submission %s after %d seconds", submissionID, timeLimit)
-			return "", executionTimeMs, 0, fmt.Errorf("Time Limit Exceeded")
-		}
-
-		// Handle other command execution errors or non-zero exit codes
-		execErr := fmt.Errorf("docker run command execution failed: %w (stderr: %s)", err, stderr.String())
-
+		// Check if the error is due to timeout from the 'timeout' command inside container (exit code 124)
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			// A non-zero exit code usually indicates a Runtime Error
-			log.Printf("Execution failed with exit code %d for submission %s (stderr: %s)", exitErr.ExitCode(), submissionID, stderr.String())
-			runtimeErr = fmt.Errorf("Runtime Error (Exit Code %d): %s", exitErr.ExitCode(), stderr.String())
-			// Note: You might want to analyze stderr more for specific error types (e.g., Segmentation Fault, etc.)
-		} else {
-			// Other execution errors (e.g., docker daemon not running)
-			log.Printf("Docker execution failed unexpectedly for submission %s: %v", submissionID, execErr)
-			runtimeErr = fmt.Errorf("Execution System Error: %v", execErr)
+			if exitErr.ExitCode() == 124 {
+				log.Printf("Execution timed out (TLE) for submission %s after %d seconds. Docker stderr: %s", submissionID, timeLimit, dockerStderr.String())
+				return "", executionTimeMs, 0, fmt.Errorf("Time Limit Exceeded")
+			}
+			// Other non-zero exit codes usually indicate a Runtime Error
+			log.Printf("Execution failed with exit code %d for submission %s (user stderr: %s, docker stderr: %s)", exitErr.ExitCode(), submissionID, userProgramStderr, dockerStderr.String())
+			return "", executionTimeMs, 0, fmt.Errorf("Runtime Error (Exit Code %d): %s", exitErr.ExitCode(), userProgramStderr)
 		}
-		// For now, we return empty output on error. You might decide to return stderr for RTE.
-		return "", executionTimeMs, 0, runtimeErr
+
+		// Check if the error is due to context cancellation/timeout from Go's side
+		if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+			log.Printf("Execution timed out (Go context) for submission %s after %d seconds. Docker stderr: %s", submissionID, timeLimit, dockerStderr.String())
+			return "", executionTimeMs, 0, fmt.Errorf("Time Limit Exceeded (Go Context Timeout)")
+		}
+
+		// Other execution errors (e.g., docker daemon not running, invalid docker command)
+		log.Printf("Docker execution failed unexpectedly for submission %s: %v (Docker stderr: %s)", submissionID, err, dockerStderr.String())
+		return "", executionTimeMs, 0, fmt.Errorf("Execution System Error: %v (Docker stderr: %s)", err, dockerStderr.String())
 	}
 
 	// Execution successful (exit code 0)
@@ -232,34 +232,31 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 	// Measuring memory usage accurately inside Docker requires more advanced techniques
 	// (e.g., reading cgroup stats from the host, using docker stats API if available and permissible).
 	// For now, return a placeholder value.
-	memoryUsedMb = 0 // Placeholder
+	memoryUsedKb = 0 // Placeholder
 
-	log.Printf("Captured output for submission %s. Execution time: %dms, Memory: %dMB (placeholder)", submissionID, executionTimeMs, memoryUsedMb)
+	log.Printf("Captured output for submission %s. Execution time: %dms, Memory: %dKB (placeholder)", submissionID, executionTimeMs, memoryUsedKb)
 
-	return output, executionTimeMs, memoryUsedMb, nil
+	return output, executionTimeMs, memoryUsedKb, nil
 }
 
 // PrepareEnvironment creates a temporary directory and writes source code and test case inputs.
 // It returns the path to the temporary directory.
-func (r *Runner) PrepareEnvironment(submissionID string, sourceCode string, testCases []store.TestCase) (tempDir string, err error) {
-	log.Printf("Preparing environment for submission %s", submissionID)
+func (r *Runner) PrepareEnvironment(submissionID string, sourceCode string, testCases []store.TestCase, lang string) (tempDir string, err error) {
+	log.Printf("Preparing environment for submission %s (lang: %s)", submissionID, lang)
+
+	config, ok := r.LangConfig[lang]
+	if !ok {
+		return "", fmt.Errorf("unsupported language for environment preparation: %s", lang)
+	}
 
 	// Create a unique temporary directory
-	// Use a base temp dir like os.TempDir() and append submissionID
 	tempDir = filepath.Join(os.TempDir(), "judge", submissionID)
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create temp directory %s: %w", tempDir, err)
 	}
 
-	// Write source code to a file in the temp directory
-	sourceFileName := "main.code" // Default, will be overridden by lang config
-	// Need to get the correct source file name based on language from LangConfig
-
-	// For now, just use a generic name or determine extension based on 'lang'
-
-	// NOTE: This needs to be updated to use the SourceFileName from LangConfig
-
-	sourceFilePath := filepath.Join(tempDir, sourceFileName)
+	// Write source code to a file in the temp directory, using language-specific file name
+	sourceFilePath := filepath.Join(tempDir, config.SourceFileName)
 	if err := os.WriteFile(sourceFilePath, []byte(sourceCode), 0644); err != nil {
 		return "", fmt.Errorf("failed to write source code file %s: %w", sourceFilePath, err)
 	}
@@ -267,7 +264,7 @@ func (r *Runner) PrepareEnvironment(submissionID string, sourceCode string, test
 
 	// Write test case input files
 	for i, tc := range testCases {
-		inputFileName := fmt.Sprintf("input%d.txt", i)
+		inputFileName := fmt.Sprintf("input%d.txt", i) // Using a generic input filename for now as testCase is passed directly
 		inputFilePath := filepath.Join(tempDir, inputFileName)
 		if err := os.WriteFile(inputFilePath, []byte(tc.Input), 0644); err != nil {
 			return "", fmt.Errorf("failed to write test case input file %s: %w", inputFilePath, err)
