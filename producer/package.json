@@ -1,0 +1,12 @@
+{
+  "name": "producer",
+  "version": "1.0.0",
+  "description": "BullMQ producer for judge system",
+  "main": "test-queue.js",
+  "scripts": {
+    "start": "node test-queue.js"
+  },
+  "dependencies": {
+    "bullmq": "^5.0.0"
+  }
+}
