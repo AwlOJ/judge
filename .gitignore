@@ -1,0 +1,38 @@
+# Node.js
+node_modules/
+.pnp/
+.pnp.js
+.env
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.parcel-cache/
+.eslintcache
+/dist/
+/build/
+
+# Go
+# Binaries for programs
+*.exe
+*.dll
+*.so
+*.dylib
+*.rpm
+*.deb
+*.bin
+
+# Test binary, can be achieved by `go test -c`
+*-test
+*.test
+
+# Output of the go toolchain
+/tmp/
+/temp_submission/ # Dùng cho Docker temp dir
+
+# Build outputs
+*.o
+*.a
+
+# Project-local .vscode folder
+.vscode/
