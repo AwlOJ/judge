@@ -1,23 +1,19 @@
-const { Queue } = require('bullmq');
+const Redis = require('ioredis');
 
-const submissionQueue = new Queue('submissions', {
-  connection: {
-    host: 'localhost',
-    port: 6379,
-  },
+const redis = new Redis({
+  host: 'localhost',
+  port: 6379,
 });
 
 async function addJobs() {
-  console.log('Adding 10 jobs to the queue...');
+  console.log('Adding 10 simple jobs to Redis list...');
   for (let i = 0; i < 10; i++) {
-    await submissionQueue.add(
-      'submissionJob',
-      { message: `hello world from job ${i + 1}` },
-      { jobId: `job-${i + 1}` }
-    );
-    console.log(`Added job ${i + 1}`);
+    const jobData = JSON.stringify({ jobId: `job-${i + 1}`, message: `hello world from simple job ${i + 1}` });
+    await redis.rpush('simple-judge-queue', jobData);
+    console.log(`Added simple job ${i + 1}: ${jobData}`);
   }
-  console.log('Finished adding jobs.');
+  console.log('Finished adding simple jobs.');
+  redis.disconnect();
   process.exit(0);
 }
 

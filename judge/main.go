@@ -27,14 +27,8 @@ func main() {
 	fmt.Println("Connected to Redis. Waiting for jobs...")
 
 	for {
-		// BLPOP command to pop a job from the 'bull:submissions:wait' list
-		// This is how BullMQ stores jobs before they are processed.
-		// The key might vary slightly depending on BullMQ version and configuration,
-		// but 'bull:queueName:wait' is a common pattern for unprocessed jobs.
-		// We'll use 'bull:submissions:wait' based on typical BullMQ internal key naming.
-		// If jobs are not consumed, you might need to check BullMQ's actual internal keys
-		// or use BullMQ's dedicated Go client if available (though go-redis is sufficient for raw commands).
-		result, err := rdb.BLPop(ctx, 0, "bull:submissions:wait").Result()
+		// BLPOP command to pop a job from the 'simple-judge-queue' list
+		result, err := rdb.BLPop(ctx, 0, "simple-judge-queue").Result()
 		if err != nil {
 			log.Printf("Error receiving from Redis: %v", err)
 			time.Sleep(1 * time.Second) // Prevent busy-loop on error
