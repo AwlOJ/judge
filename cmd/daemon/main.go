@@ -5,16 +5,17 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
-	"strings" // Added missing import
 
 	"judge-service/internal/queue"
 	"judge-service/internal/runner"
 	"judge-service/internal/store"
 
-	"github.com/redis/go-redis/v9"
-	"judge-service/internal/core"
 	"errors"
+	"judge-service/internal/core"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -107,7 +108,7 @@ func main() {
 		if err != nil {
 			log.Printf("Error fetching submission %s: %v", job.SubmissionID, err)
 			updateStatus("Internal Error") // Update status on fetch error
-			return nil // Do not retry this job if data fetching failed
+			return nil                     // Do not retry this job if data fetching failed
 		}
 		log.Printf("Fetched submission for problem ID: %s", submission.ProblemID.Hex())
 
@@ -115,10 +116,9 @@ func main() {
 		if err != nil {
 			log.Printf("Error fetching problem %s for submission %s: %v", submission.ProblemID.Hex(), job.SubmissionID, err)
 			updateStatus("Internal Error") // Update status on fetch error
-			return nil // Do not retry this job
+			return nil                     // Do not retry this job
 		}
 		log.Printf("Fetched problem: %s", problem.Title)
-
 
 		// 2. Preparing the environment
 		tempDir, err = runnerInstance.PrepareEnvironment(job.SubmissionID, submission.Code, problem.TestCases, submission.Language)
@@ -134,7 +134,7 @@ func main() {
 		if compileErr != nil {
 			log.Printf("Compilation failed for submission %s: %v", job.SubmissionID, compileErr)
 			updateResult("Compilation Error", 0, 0) // Update with 0 time/memory
-			return nil // Do not retry on compilation errors, just report and finish
+			return nil                              // Do not retry on compilation errors, just report and finish
 		}
 		log.Printf("Compilation successful. Executable: %s", executablePath)
 
@@ -142,6 +142,7 @@ func main() {
 		var finalStatus = "Accepted"
 		var totalExecTimeMs int64 = 0
 		var maxMemoryUsedKb int64 = 0
+		var numofloops int64 = 0
 
 		for i, testCase := range problem.TestCases {
 			log.Printf("Running test case %d for submission %s...", i, job.SubmissionID)
@@ -153,6 +154,7 @@ func main() {
 
 			// Aggregate total execution time and max memory used
 			totalExecTimeMs += int64(executionTimeMs)
+			numofloops++
 			if int64(memoryUsedKb) > maxMemoryUsedKb {
 				maxMemoryUsedKb = int64(memoryUsedKb)
 			}
@@ -179,6 +181,8 @@ func main() {
 				break // Stop on first wrong answer
 			}
 		}
+
+		totalExecTimeMs /= numofloops
 
 		// 5. Updating submission status/result in MongoDB
 		log.Printf("Finalizing submission %s with status: %s, Time: %dms, Memory: %dKB", job.SubmissionID, finalStatus, totalExecTimeMs, maxMemoryUsedKb)
