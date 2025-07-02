@@ -5,19 +5,28 @@ const redis = new Redis({
   port: 6379,
 });
 
-async function addJobs() {
-  console.log('Adding 10 simple jobs to Redis list...');
-  for (let i = 0; i < 10; i++) {
-    const jobData = JSON.stringify({ jobId: `job-${i + 1}`, message: `hello world from simple job ${i + 1}` });
-    await redis.rpush('simple-judge-queue', jobData);
-    console.log(`Added simple job ${i + 1}: ${jobData}`);
+async function addSubmissionJob(submissionId) {
+  if (!submissionId) {
+    console.error('Error: submissionId is required to add a job.');
+    process.exit(1);
   }
-  console.log('Finished adding simple jobs.');
+  
+  const jobPayload = JSON.stringify({ submissionId: submissionId });
+  
+  // Đẩy job vào đúng queue mà Judge Service đang lắng nghe
+  await redis.rpush('submission_queue', jobPayload); 
+  console.log(`Added submission job to 'submission_queue': ${jobPayload}`);
+  
   redis.disconnect();
   process.exit(0);
 }
 
-addJobs().catch(err => {
-  console.error('Error adding jobs:', err);
+// --- Hướng dẫn sử dụng ---
+// THAY THẾ "YOUR_SUBMISSION_ID_HERE" bằng ID bài nộp THỰC TẾ của bạn từ MongoDB!
+// Ví dụ: const MY_SUBMISSION_ID = "6863e14df71cc2e13c748a60"; 
+const YOUR_ACTUAL_SUBMISSION_ID = "68654258ba087dc7941281a5"; 
+
+addSubmissionJob(YOUR_ACTUAL_SUBMISSION_ID).catch(err => {
+  console.error('Error adding submission job:', err);
   process.exit(1);
 });
