@@ -15,8 +15,16 @@ import (
 	"errors"
 	"judge-service/internal/core"
 
+	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 )
+
+func init() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("No .env file found or error loading .env")
+	}
+}
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
