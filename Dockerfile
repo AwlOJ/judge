@@ -23,3 +23,5 @@ ENV MONGO_URI=none
 ENV REDIS_URL=none
 
 ENTRYPOINT ["./judge"]
+
+#iukhuyen:333333
