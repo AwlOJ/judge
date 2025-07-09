@@ -31,10 +31,11 @@ func main() {
 	defer cancel()
 
 	// --- Configuration (will be moved to internal/config later) ---
-	redisAddr := os.Getenv("REDIS_ADDR")
-	if redisAddr == "" {
-		redisAddr = "localhost:6379"
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		log.Fatal("REDIS_URL environment variable not set")
 	}
+
 	queueName := os.Getenv("REDIS_QUEUE_NAME")
 	if queueName == "" {
 		queueName = "submission_queue"
@@ -51,17 +52,15 @@ func main() {
 	}
 
 	// --- Connect to Redis ---
-	log.Printf("Connecting to Redis at %s", redisAddr)
-	log.Printf("Redis Address: %s", redisAddr)
-	log.Printf("Redis Password: %s", os.Getenv("REDIS_PASSWORD"))
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: os.Getenv("REDIS_PASSWORD"), // Load password from ENV
-		DB:       0,                           // Default DB
-	})
+	log.Printf("Connecting to Redis using URL: %s", redisURL)
+	opt, err := redis.ParseURL(redisURL)
+	if err != nil {
+		log.Fatalf("Error parsing Redis URL: %v", err)
+	}
+	rdb := redis.NewClient(opt)
 
 	// Ping Redis to check connection
-	_, err := rdb.Ping(ctx).Result()
+	_, err = rdb.Ping(ctx).Result()
 	if err != nil {
 		log.Fatalf("Could not connect to Redis: %v", err)
 	}
