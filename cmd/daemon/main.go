@@ -52,6 +52,8 @@ func main() {
 
 	// --- Connect to Redis ---
 	log.Printf("Connecting to Redis at %s", redisAddr)
+	log.Printf("Redis Address: %s", redisAddr)
+	log.Printf("Redis Password: %s", os.Getenv("REDIS_PASSWORD"))
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     redisAddr,
 		Password: os.Getenv("REDIS_PASSWORD"), // Load password from ENV
