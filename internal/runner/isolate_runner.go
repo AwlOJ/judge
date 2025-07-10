@@ -38,13 +38,13 @@ func NewRunner() *Runner {
 		}{
 			"cpp": {
 				CompileCmd:         []string{"g++", "main.cpp", "-o", "main.out", "-O2", "-static", "-Wall"}, // Paths relative to /box
-				RunCmd:             []string{"." + string(filepath.Separator) + "main.out"},                                                  // Path relative to /box
+				RunCmd:             []string{"." + string(filepath.Separator) + "main.out"},                  // Path relative to /box
 				SourceFileName:     "main.cpp",
 				ExecutableFileName: "main.out",
 			},
 			"python": {
-				CompileCmd:         nil,                                     // Python is interpreted, no compile step
-				RunCmd:             []string{"python3", "main.py"},          // Path relative to /box
+				CompileCmd:         nil,                            // Python is interpreted, no compile step
+				RunCmd:             []string{"python3", "main.py"}, // Path relative to /box
 				SourceFileName:     "main.py",
 				ExecutableFileName: "", // Not applicable for interpreted languages
 			},
@@ -74,13 +74,13 @@ func (r *Runner) Compile(ctx context.Context, submissionID string, lang string, 
 	// isolate --box-id=<submissionID> --cg --dir=/etc=RO --cwd=/box --run -- <compile_command...>
 	// Note: tempDir on host maps to /box in sandbox
 	isolateArgs := []string{
-		"--box-id="+submissionID, // Unique box ID
-		"--cg",                    // Use cgroups for better resource control
-		"--dir=/etc=RO",           // Mount /etc as read-only for security
-		"--full-env",              // Provide a full environment (PATH etc.)
-		"--cwd=/box",              // Set working directory inside the box to /box
-		"--run",                   // Run the following command
-		"--",                      // Separator for command and its arguments
+		"--box-id=" + submissionID, // Unique box ID
+		"--cg",                     // Use cgroups for better resource control
+		"--dir=/etc=RO",            // Mount /etc as read-only for security
+		"--full-env",               // Provide a full environment (PATH etc.)
+		"--cwd=/box",               // Set working directory inside the box to /box
+		"--run",                    // Run the following command
+		"--",                       // Separator for command and its arguments
 	}
 
 	// Append the actual compile command (paths like main.cpp are relative to /box)
@@ -142,13 +142,13 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 	// --fsize=65536 --processes=100 --dir=/etc=RO --stdin=input.txt --stdout=output.txt --stderr=stderr.txt \
 	// --meta=meta.txt --cwd=/box --run -- <run_command...>
 	isolateArgs := []string{
-		"--box-id="+submissionID,
-		"--cg", // Use cgroups
-		fmt.Sprintf("--time=%d", timeLimit), // CPU time limit in seconds
+		"--box-id=" + submissionID,
+		"--cg",                                     // Use cgroups
+		fmt.Sprintf("--time=%d", timeLimit),        // CPU time limit in seconds
 		fmt.Sprintf("--wall-time=%d", timeLimit+5), // Wall clock time limit (buffer for I/O)
-		fmt.Sprintf("--mem=%d", memoryLimit*1024), // Memory limit in KB (convert MB to KB)
-		"--fsize=65536", // Max output file size in KB (e.g., 64MB)
-		"--processes=100", // Max processes
+		fmt.Sprintf("--mem=%d", memoryLimit*1024),  // Memory limit in KB (convert MB to KB)
+		"--fsize=65536",                            // Max output file size in KB (e.g., 64MB)
+		"--processes=100",                          // Max processes
 		"--dir=/etc=RO",
 		"--full-env",
 		fmt.Sprintf("--stdin=%s", sandboxInputPath),
@@ -206,8 +206,7 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 		// max-rss:1500
 		// exitcode:0
 		// status:OK
-		lines := strings.Split(metaContent, "
-")
+		lines := strings.Split(metaContent, "")
 		for _, line := range lines {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
@@ -230,7 +229,6 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 	} else {
 		log.Printf("Warning: Failed to read isolate meta file for submission %s: %v", submissionID, errMeta)
 	}
-
 
 	// Handle execution errors reported by isolate or exec.CommandContext
 	if err != nil {
