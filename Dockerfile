@@ -1,4 +1,4 @@
-# --------- Stage 1: Build Judge Service Go application ---------
+# --------- Stage 1: Build Go binary ---------
 FROM golang:1.22 AS judge_go_builder
 
 WORKDIR /app
@@ -10,11 +10,10 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/daemon ./cmd/daemon/main.go
 
-# --------- Stage 2: Runtime for Judge Service (with isolate) ---------
+# --------- Stage 2: Runtime with isolate ---------
 FROM ubuntu:20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,9 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     python3 \
     git \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Build isolate từ GitHub
+# Nếu vẫn lỗi thì uncomment dòng này:
+# RUN git config --global http.sslVerify false
+
 RUN git clone https://github.com/ioi/isolate.git /tmp/isolate && \
     cd /tmp/isolate && \
     make && \
