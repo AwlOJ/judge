@@ -18,11 +18,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    isolate \
+    build-essential \
     gcc \
     g++ \
     python3 \
+    git \
     && rm -rf /var/lib/apt/lists/*
+
+# Build isolate từ GitHub
+RUN git clone https://github.com/ioi/isolate.git /tmp/isolate && \
+    cd /tmp/isolate && \
+    make && \
+    make install && \
+    cd / && rm -rf /tmp/isolate
 
 COPY --from=judge_go_builder /app/bin/daemon ./judge
 
@@ -30,5 +38,6 @@ ENV MONGO_URI=none
 ENV REDIS_URL=none
 
 ENTRYPOINT ["./judge"]
+
 
 #iukhuyen:333333
