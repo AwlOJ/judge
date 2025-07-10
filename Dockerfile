@@ -22,10 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     python3 \
     git \
+    make \
+    pkg-config \
+    libcap-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Nếu vẫn lỗi thì uncomment dòng này:
 # RUN git config --global http.sslVerify false
 
 RUN git clone https://github.com/ioi/isolate.git /tmp/isolate && \
