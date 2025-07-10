@@ -1,5 +1,5 @@
-# --------- Stage 1: Build ---------
-FROM golang:1.22 AS builder
+# --------- Stage 1: Build Judge Service Go application ---------
+FROM golang:1.22 AS judge_go_builder
 
 WORKDIR /app
 
@@ -10,14 +10,19 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/daemon ./cmd/daemon/main.go
 
-# --------- Stage 2: Runtime ---------
-FROM alpine:latest
+# --------- Stage 2: Runtime for Judge Service (with isolate) ---------
+FROM ubuntu:latest
 
 WORKDIR /app
 
-COPY --from=builder /app/bin/daemon ./judge
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    isolate \
+    gcc \
+    g++ \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apk --no-cache add ca-certificates
+COPY --from=judge_go_builder /app/bin/daemon ./judge
 
 ENV MONGO_URI=none
 ENV REDIS_URL=none
