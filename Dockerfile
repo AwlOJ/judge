@@ -15,6 +15,9 @@ FROM ubuntu:20.04
 
 WORKDIR /app
 
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
+
 RUN mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://www.ucw.cz/isolate/debian/signing-key.asc -o /etc/apt/keyrings/isolate.asc && \
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/isolate.asc] http://www.ucw.cz/isolate/debian/ focal-isolate main" > /etc/apt/sources.list.d/isolate.list
@@ -24,7 +27,6 @@ RUN apt-get update && \
     isolate \
     gcc g++ make \
     python3 python3-pip \
-    curl ca-certificates \
     libcap-dev libsystemd-dev pkg-config
 
 COPY --from=awloj-builder /app/bin/daemon ./judge
