@@ -11,13 +11,12 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/daemon ./cmd/daemon/main.go
 
 # --------- Stage 2: Runtime for Judge Service (with isolate) ---------
-FROM ubuntu:latest
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
-# Enable universe repository and install isolate and necessary compilers/interpreters
-RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common
-RUN add-apt-repository universe
 RUN apt-get update && apt-get install -y --no-install-recommends \
     isolate \
     gcc \
