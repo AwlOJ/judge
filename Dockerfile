@@ -15,6 +15,9 @@ FROM ubuntu:latest
 
 WORKDIR /app
 
+# Enable universe repository and install isolate and necessary compilers/interpreters
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common
+RUN add-apt-repository universe
 RUN apt-get update && apt-get install -y --no-install-recommends \
     isolate \
     gcc \
@@ -29,4 +32,4 @@ ENV REDIS_URL=none
 
 ENTRYPOINT ["./judge"]
 
-#iukhuyen:33333
+#iukhuyen:333333
