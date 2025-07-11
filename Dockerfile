@@ -11,7 +11,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/daemon ./cmd/daemon/main.go
 
 # --------- Stage 2: Runtime ---------
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ RUN apt-get update && \
 
 RUN mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://www.ucw.cz/isolate/debian/signing-key.asc -o /etc/apt/keyrings/isolate.asc && \
-    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/isolate.asc] http://www.ucw.cz/isolate/debian/ focal-isolate main" > /etc/apt/sources.list.d/isolate.list
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/isolate.asc] http://www.ucw.cz/isolate/debian/ jammy-isolate main" > /etc/apt/sources.list.d/isolate.list
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
