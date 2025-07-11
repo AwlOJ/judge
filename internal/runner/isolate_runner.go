@@ -74,7 +74,6 @@ func (r *Runner) Compile(ctx context.Context, submissionID string, lang string, 
 	args := []string{
 		"--box-id=" + boxID,
 		"--cg",
-		"--dir=/etc:/etc",
 		"--full-env",
 		"--cwd=/box",
 		"--run",
@@ -123,7 +122,6 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 		fmt.Sprintf("--mem=%d", memoryLimit*1024),
 		"--fsize=65536",
 		"--processes=100",
-		"--dir=/etc:/etc",
 		"--full-env",
 		"--stdin=input.txt",
 		"--stdout=output.txt",
@@ -159,7 +157,8 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 	memoryUsedKb := 0
 	status := ""
 
-	lines := strings.Split(string(metaBytes), "\n")
+	lines := strings.Split(string(metaBytes), "
+")
 	for _, line := range lines {
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
