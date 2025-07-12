@@ -15,6 +15,9 @@ FROM ubuntu:22.04
 
 WORKDIR /app
 
+# Ensure /run/isolate directory exists and is writable for isolate to manage cgroups
+RUN mkdir -p /run/isolate && chmod 777 /run/isolate
+
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
 

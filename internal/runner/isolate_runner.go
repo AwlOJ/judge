@@ -75,7 +75,7 @@ func (r *Runner) Compile(ctx context.Context, submissionID string, lang string, 
 		"--box-id=" + boxID,
 		"--cg",
 		"--full-env",
-		"--cwd=/box",
+		"--dir=/sys/fs/cgroup:/sys/fs/cgroup",
 		"--run",
 		"--",
 	}
@@ -122,12 +122,12 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 		fmt.Sprintf("--mem=%d", memoryLimit*1024),
 		"--fsize=65536",
 		"--processes=100",
+		"--dir=/sys/fs/cgroup:/sys/fs/cgroup",
 		"--full-env",
 		"--stdin=input.txt",
 		"--stdout=output.txt",
 		"--stderr=stderr.txt",
 		"--meta=meta.txt",
-		"--cwd=/box",
 		"--run",
 		"--",
 	}
@@ -157,8 +157,7 @@ func (r *Runner) Execute(ctx context.Context, submissionID string, lang string, 
 	memoryUsedKb := 0
 	status := ""
 
-	lines := strings.Split(string(metaBytes), "
-")
+	lines := strings.Split(string(metaBytes), "\n")
 	for _, line := range lines {
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
