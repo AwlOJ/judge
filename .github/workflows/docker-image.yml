@@ -1,8 +1,8 @@
-name: Build Image
+name: Build Judge-Service(Isolate)
 
 on:
   push:
-    branches: [master]
+    branches: [isolate]
 
 jobs:
   build-and-push:
