@@ -123,17 +123,14 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 	}
 
 	tempDir := filepath.Dir(executablePath)
-
-	// Define paths for I/O files
+	
 	inputFile := filepath.Join(tempDir, "input.txt")
 	outputFile := filepath.Join(tempDir, "output.txt")
 	stderrFile := filepath.Join(tempDir, "stderr.txt")
 
-	// Write the test case input to the input file
 	if err := os.WriteFile(inputFile, []byte(testCase.Input), 0644); err != nil {
 		return "", 0, 0, fmt.Errorf("failed to write input file: %w", err)
 	}
-	// Create empty output/stderr files so nsjail can write to them
 	os.WriteFile(outputFile, []byte{}, 0644)
 	os.WriteFile(stderrFile, []byte{}, 0644)
 
@@ -141,8 +138,13 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 	args := []string{
 		"--mode", "o",
 		"--quiet",
-		"--bindmount", fmt.Sprintf("%s:/app", tempDir), // Mount temp dir (rw)
-		"--chroot", "/",
+		// Mount necessary system directories as read-only into a new empty root.
+		"--bindmount_ro", "/bin",
+		"--bindmount_ro", "/lib",
+		"--bindmount_ro", "/lib64",
+		"--bindmount_ro", "/usr",
+		// Mount the temporary user code directory as read-write
+		"--bindmount", fmt.Sprintf("%s:/app", tempDir),
 		"--cwd", "/app",
 		"--time_limit", strconv.Itoa(timeLimit),
 		"--rlimit_as", strconv.Itoa(memoryLimit), // in MB
@@ -151,23 +153,21 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 		"--rlimit_nofile", "10",
 		"--proc_ro",
 		"--iface_no_lo",
-		// Use nsjail's native I/O redirection instead of a shell
 		"--stdin", "/app/input.txt",
 		"--stdout", "/app/output.txt",
 		"--stderr", "/app/stderr.txt",
 	}
-
-	// Add the actual command to run inside nsjail
+	
 	args = append(args, "--")
 	args = append(args, config.RunCmd...)
 
 	cmd := exec.CommandContext(ctx, r.NsjailPath, args...)
-
+	
 	var nsjailStderr bytes.Buffer
 	cmd.Stderr = &nsjailStderr
-
+	
 	log.Printf("Running nsjail command: %s %s", r.NsjailPath, strings.Join(args, " "))
-
+	
 	startTime := time.Now()
 	err := cmd.Run()
 	duration := time.Since(startTime)
@@ -183,10 +183,6 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 			ws := exitErr.Sys().(syscall.WaitStatus)
 			exitCode := ws.ExitStatus()
 
-			// Exit codes from nsjail can indicate specific errors
-			// These are standard signals: 128 + signal number
-			// SIGXCPU (24) -> TLE -> 128 + 24 = 152
-			// SIGKILL (9)  -> OOM -> 128 + 9  = 137
 			if ws.Signaled() {
 				sig := ws.Signal()
 				if sig == syscall.SIGXCPU {
@@ -209,6 +205,7 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 	log.Printf("Execution success for submission %s. Time: %dms", submissionID, execTimeMs)
 	return output, execTimeMs, 0, nil
 }
+
 
 // CleanupEnvironment removes the temporary directory.
 func (r *Runner) CleanupEnvironment(tempDir string) error {
