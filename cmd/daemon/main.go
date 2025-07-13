@@ -104,9 +104,9 @@ func main() {
 
 func processJob(ctx context.Context, job *queue.JobPayload, storeInstance *store.Store, runnerInstance *runner.Runner) error {
 	log.Printf("Handling job for submission ID: %s", job.SubmissionID)
-	
+
 	var tempDir string // Define tempDir here to make it accessible for deferred cleanup
-	
+
 	// Use a named function for deferred cleanup to avoid capturing loop variables.
 	defer func() {
 		if tempDir != "" {
@@ -164,15 +164,15 @@ func processJob(ctx context.Context, job *queue.JobPayload, storeInstance *store
 	var finalStatus = "Accepted"
 	var totalExecTimeMs int64 = 0
 	var maxMemoryUsedKb int64 = 0
-	
+
 	for i, testCase := range problem.TestCases {
 		log.Printf("Running test case %d for submission %s...", i+1, job.SubmissionID)
-		
+
 		output, execTimeMs, memoryUsedKb, runtimeErr := runnerInstance.Execute(
 			ctx, job.SubmissionID, submission.Language, executablePath, &testCase,
 			problem.TimeLimit, problem.MemoryLimit,
 		)
-		
+
 		totalExecTimeMs += int64(execTimeMs)
 		if int64(memoryUsedKb) > maxMemoryUsedKb {
 			maxMemoryUsedKb = int64(memoryUsedKb)
@@ -191,11 +191,11 @@ func processJob(ctx context.Context, job *queue.JobPayload, storeInstance *store
 			updateResult(finalStatus, int64(execTimeMs), maxMemoryUsedKb)
 			return nil // Stop processing and return
 		}
-		
+
 		if !core.CompareOutputs(output, testCase.Output) {
 			log.Printf("Submission %s - Test case %d: Wrong Answer", job.SubmissionID, i+1)
 			finalStatus = "Wrong Answer"
-			updateResult(finalStatus, totalExecTimeMs / int64(i+1), maxMemoryUsedKb)
+			updateResult(finalStatus, totalExecTimeMs/int64(i+1), maxMemoryUsedKb)
 			return nil // Stop processing and return
 		}
 
@@ -203,7 +203,7 @@ func processJob(ctx context.Context, job *queue.JobPayload, storeInstance *store
 	}
 
 	avgExecTimeMs := totalExecTimeMs / int64(len(problem.TestCases))
-	
+
 	// 5. Update final result
 	log.Printf("Finalizing submission %s with status: %s, Avg Time: %dms, Max Memory: %dKB", job.SubmissionID, finalStatus, avgExecTimeMs, maxMemoryUsedKb)
 	updateResult(finalStatus, avgExecTimeMs, maxMemoryUsedKb)

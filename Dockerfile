@@ -16,12 +16,13 @@ FROM ubuntu:22.04
 
 WORKDIR /app
 
-# Install runtime dependencies: compilers and firejail
+# Install runtime dependencies: compilers, firejail, and trusted CAs
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     g++ \
     python3 \
-    firejail
+    firejail \
+    ca-certificates
 
 # Copy the compiled Go application from the 'builder' stage
 COPY --from=builder /app/bin/daemon /app/daemon

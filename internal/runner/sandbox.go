@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
+
 	"strings"
 	"time"
+
+	"judge-service/internal/store"
 )
 
 // Runner handles the execution of code within a secure sandbox using firejail.
@@ -46,7 +48,7 @@ func NewRunner() (*Runner, error) {
 			"cpp": {
 				CompilerPath:       "/usr/bin/g++",
 				CompileCmd:         []string{"/usr/bin/g++", "main.cpp", "-o", "main.out", "-O2", "-static", "-Wall"},
-				RunCmd:             []string{"./main.out"}, // Relative to the tempDir
+				RunCmd:             []string{"./main.out"},
 				SourceFileName:     "main.cpp",
 				ExecutableFileName: "main.out",
 			},
@@ -101,6 +103,7 @@ func (r *Runner) Compile(ctx context.Context, submissionID string, lang string, 
 
 	log.Printf("Running compile command: %s in %s", strings.Join(cmd.Args, " "), cmd.Dir)
 
+	// THE FIX IS HERE: Actually run the command and check the error.
 	if err := cmd.Run(); err != nil {
 		execErr := fmt.Errorf("compilation failed (stderr: %s)", stderr.String())
 		log.Printf("Compilation failed for submission %s: %v", submissionID, execErr)
@@ -122,31 +125,30 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 	tempDir := filepath.Dir(executablePath)
 
 	// --- Build the firejail command ---
-	// firejail is much simpler. It creates a temporary, isolated environment.
 	args := []string{
-		"--quiet",              // Suppress verbose output
-		"--private=" + tempDir, // Create a temporary home directory based on our tempDir
-		"--net=none",           // Disable networking
-		fmt.Sprintf("--rlimit-cpu=%d", timeLimit),   // CPU time limit in seconds
-		fmt.Sprintf("--rlimit-as=%d", memoryLimit*1024*1024), // Memory limit in bytes
+		"--quiet",
+		"--noprofile",                          // Start with a clean slate, no default profiles.
+		"--net=none",                           // No network access.
+		fmt.Sprintf("--whitelist=%s", tempDir), // CRITICAL: Only allow access to our temporary directory.
+		fmt.Sprintf("--rlimit-cpu=%d", timeLimit),
+		fmt.Sprintf("--rlimit-as=%d", memoryLimit*1024*1024),
 	}
 
-	// The command to run inside the sandbox. We use `timeout` for an extra layer of time limit protection.
-	timeoutCmd := fmt.Sprintf("timeout %d %s", timeLimit, strings.Join(config.RunCmd, " "))
-	args = append(args, "bash", "-c", timeoutCmd)
-	
-	cmd := exec.CommandContext(ctx, r.FirejailPath, args...)
+	args = append(args, config.RunCmd...)
 
-	// Provide the test case input via stdin
+	cmd := exec.CommandContext(ctx, r.FirejailPath, args...)
+	// CRITICAL: Set the working directory for the command to our tempDir.
+	// This ensures that "./main.out" is found.
+	cmd.Dir = tempDir
+
 	cmd.Stdin = strings.NewReader(testCase.Input)
-	
-	// Capture stdout and stderr
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
-	log.Printf("Running firejail command: %s %s", r.FirejailPath, strings.Join(args, " "))
-	
+
+	log.Printf("Running firejail command: %s %s (in dir: %s)", r.FirejailPath, strings.Join(args, " "), tempDir)
+
 	startTime := time.Now()
 	err := cmd.Run()
 	duration := time.Since(startTime)
@@ -154,13 +156,19 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 
 	if err != nil {
 		errMsg := ""
-		// Check for timeout from our `timeout` command
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 124 {
-			errMsg = "Time Limit Exceeded"
-		} else {
-			// Other runtime errors
+		// The error from firejail/the program will be on stderr
+		if stderr.Len() > 0 {
 			errMsg = fmt.Sprintf("Runtime Error: %s", stderr.String())
+		} else {
+			errMsg = fmt.Sprintf("Runtime Error: %v", err)
 		}
+
+		// Firejail combined with `rlimit-cpu` will cause the process to be killed by the kernel
+		// which results in an exit code like 137 (SIGKILL) or similar.
+		if ctx.Err() == context.DeadlineExceeded || strings.Contains(err.Error(), "signal") {
+			errMsg = "Time Limit Exceeded"
+		}
+
 		return "", execTimeMs, 0, fmt.Errorf(errMsg)
 	}
 
