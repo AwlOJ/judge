@@ -1,4 +1,4 @@
-# --------- Stage 1: Build ---------
+# --------- Stage 1: Build Go App ---------
 FROM golang:1.22 AS builder
 
 WORKDIR /app
@@ -8,39 +8,52 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/daemon ./cmd/daemon/main.go
+# Build the main daemon
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/bin/daemon ./cmd/daemon/main.go
 
-# --------- Stage 2: Runtime ---------
+# --------- Stage 2: Build nsjail ---------
+FROM ubuntu:22.04 AS nsjail_builder
+
+# Install nsjail dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    git \
+    g++ \
+    make \
+    flex \
+    bison \
+    libprotobuf-dev \
+    protobuf-compiler \
+    libnl-3-dev \
+    libnl-route-3-dev
+
+# Clone and build nsjail
+RUN git clone --depth 1 https://github.com/google/nsjail.git /nsjail_src
+WORKDIR /nsjail_src
+RUN make
+
+# --------- Stage 3: Runtime ---------
 FROM ubuntu:22.04
 
 WORKDIR /app
 
+# Install runtime dependencies (compilers, etc.)
+# We need g++, python3, and the 'time' utility which provides /usr/bin/time
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    curl \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    apt-transport-https \
-    software-properties-common
+    g++ \
+    python3 \
+    time \
+    ca-certificates
 
-RUN mkdir -p /etc/apt/keyrings && \
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+# Copy the compiled Go application from the 'builder' stage
+COPY --from=builder /app/bin/daemon /app/daemon
 
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    docker-ce \
-    docker-ce-cli \
-    containerd.io \
-    docker-buildx-plugin \
-    docker-compose-plugin
+# Copy the compiled nsjail binary from the 'nsjail_builder' stage
+COPY --from=nsjail_builder /nsjail_src/nsjail /usr/local/bin/nsjail
 
-RUN usermod -aG docker root
+# Copy runtime assets (if any)
+# COPY --from=builder /app/config /app/config
 
-COPY --from=builder /app/bin/daemon ./judge
-
-
-ENTRYPOINT ["./judge"]
-
-#iukhuyen:333333
+# Set the entrypoint
+CMD ["/app/daemon"]
