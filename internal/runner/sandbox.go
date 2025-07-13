@@ -27,18 +27,20 @@ type Runner struct {
 		SourceFileName     string
 		ExecutableFileName string
 	}
-	NsjailPath string
+	NsjailPath        string
+	NsjailConfigPath  string
 }
 
 // NewRunner creates a new Runner instance.
 func NewRunner() (*Runner, error) {
 	nsjailPath, err := exec.LookPath("nsjail")
 	if err != nil {
-		return nil, fmt.Errorf("nsjail executable not found in PATH: %w. Make sure it is installed and in the system's PATH", err)
+		return nil, fmt.Errorf("nsjail executable not found in PATH: %w", err)
 	}
 
 	return &Runner{
-		NsjailPath: nsjailPath,
+		NsjailPath:        nsjailPath,
+		NsjailConfigPath:  "/etc/nsjail.cfg", // Standard path for our config
 		LangConfig: map[string]struct {
 			CompilerPath       string
 			CompileCmd         []string
@@ -136,23 +138,13 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 
 	// --- Build the nsjail command ---
 	args := []string{
-		"--mode", "o",
-		"--quiet",
-		// Mount necessary system directories as read-only into a new empty root.
-		"--bindmount_ro", "/bin",
-		"--bindmount_ro", "/lib",
-		"--bindmount_ro", "/lib64",
-		"--bindmount_ro", "/usr",
+		"--config", r.NsjailConfigPath,
+		// Override specific limits from the config file
+		"--time_limit", strconv.Itoa(timeLimit),
+		"--rlimit_as", strconv.Itoa(memoryLimit), // in MB
 		// Mount the temporary user code directory as read-write
 		"--bindmount", fmt.Sprintf("%s:/app", tempDir),
 		"--cwd", "/app",
-		"--time_limit", strconv.Itoa(timeLimit),
-		"--rlimit_as", strconv.Itoa(memoryLimit), // in MB
-		"--rlimit_cpu", strconv.Itoa(timeLimit),
-		"--rlimit_fsize", "64",
-		"--rlimit_nofile", "10",
-		"--proc_ro",
-		"--iface_no_lo",
 		"--stdin", "/app/input.txt",
 		"--stdout", "/app/output.txt",
 		"--stderr", "/app/stderr.txt",
