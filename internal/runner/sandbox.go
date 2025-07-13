@@ -95,7 +95,6 @@ func (r *Runner) Compile(ctx context.Context, submissionID string, lang string, 
 		return config.SourceFileName, nil
 	}
 
-	// The command will run inside the tempDir.
 	cmd := exec.CommandContext(ctx, config.CompilerPath, config.CompileCmd[1:]...)
 	cmd.Dir = tempDir
 	var stderr bytes.Buffer
@@ -121,103 +120,91 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 		return "", 0, 0, fmt.Errorf("unsupported language for execution: %s", lang)
 	}
 
-	// The temp directory is the parent of the executable path.
 	tempDir := filepath.Dir(executablePath)
-	if lang == "python" { // For interpreted languages, executablePath is the source file.
-		tempDir = filepath.Dir(executablePath)
-	}
-
-	// Create files for stdin, stdout, stderr for the sandboxed process.
-	inputFile, err := os.Create(filepath.Join(tempDir, "input.txt"))
-	if err != nil {
-		return "", 0, 0, fmt.Errorf("failed to create input file: %w", err)
-	}
-	inputFile.WriteString(testCase.Input)
-	inputFile.Close()
-
+	
+	// Define paths for I/O files
+	inputFile := filepath.Join(tempDir, "input.txt")
 	outputFile := filepath.Join(tempDir, "output.txt")
 	stderrFile := filepath.Join(tempDir, "stderr.txt")
 
+	// Write the test case input to the input file
+	if err := os.WriteFile(inputFile, []byte(testCase.Input), 0644); err != nil {
+		return "", 0, 0, fmt.Errorf("failed to write input file: %w", err)
+	}
+	// Create empty output/stderr files so nsjail can write to them
+	os.WriteFile(outputFile, []byte{}, 0644)
+	os.WriteFile(stderrFile, []byte{}, 0644)
+
+
 	// --- Build the nsjail command ---
-	// nsjail mounts the temp directory containing the executable and IO files as /app
-	// It uses cgroups for resource limits and namespaces for isolation.
 	args := []string{
-		"--mode", "o", // Once: execute the command and exit.
-		"--config", "/etc/nsjail/defaults.cfg", // Use a default configuration if available
+		"--mode", "o",
 		"--quiet",
-		"--bindmount_ro", fmt.Sprintf("%s:/app", tempDir), // Mount temp dir as read-only inside sandbox
-		"--chroot", "/", // The new root will be the real root
-		"--cwd", "/app", // Set current working directory inside sandbox
+		"--bindmount", fmt.Sprintf("%s:/app", tempDir), // Mount temp dir (rw)
+		"--chroot", "/",
+		"--cwd", "/app",
 		"--time_limit", strconv.Itoa(timeLimit),
-		"--rlimit_as", strconv.Itoa(memoryLimit), // RLIMIT_AS in MB
+		"--rlimit_as", strconv.Itoa(memoryLimit), // in MB
 		"--rlimit_cpu", strconv.Itoa(timeLimit),
-		"--rlimit_fsize", "64", // Limit file size creation to 64MB
-		"--rlimit_nofile", "10", // Limit number of open file descriptors
-		"--proc_ro", // Mount /proc as read-only
-		"--iface_no_lo", // No network interfaces, including loopback
+		"--rlimit_fsize", "64",
+		"--rlimit_nofile", "10",
+		"--proc_ro",
+		"--iface_no_lo",
+		// Use nsjail's native I/O redirection instead of a shell
+		"--stdin", "/app/input.txt",
+		"--stdout", "/app/output.txt",
+		"--stderr", "/app/stderr.txt",
 	}
-
-	// Determine the actual command to run inside the sandbox.
-	runCmd := config.RunCmd
-	if lang == "python" {
-		// For python, the executable path is the source file itself.
-		// We need to adjust the path to be relative to the sandbox mount.
-		runCmd = []string{"/usr/bin/python3", filepath.Join("/app", config.SourceFileName)}
-	}
-
-	// Redirect I/O inside the shell command executed by nsjail.
-	shellCmd := fmt.Sprintf("%s < input.txt > output.txt 2> stderr.txt", strings.Join(runCmd, " "))
 	
-	// Add the command to run inside nsjail
-	args = append(args, "--", "/bin/bash", "-c", shellCmd)
+	// Add the actual command to run inside nsjail
+	args = append(args, "--")
+	args = append(args, config.RunCmd...)
 
 	cmd := exec.CommandContext(ctx, r.NsjailPath, args...)
 	
 	var nsjailStderr bytes.Buffer
-	cmd.Stderr = &nsjailStderr // Capture nsjail's own stderr, not the user's program
+	cmd.Stderr = &nsjailStderr
 	
 	log.Printf("Running nsjail command: %s %s", r.NsjailPath, strings.Join(args, " "))
 	
 	startTime := time.Now()
-	err = cmd.Run()
+	err := cmd.Run()
 	duration := time.Since(startTime)
 	execTimeMs = int(duration.Milliseconds())
 
-	// Read user program's output and stderr from files.
 	outputBytes, _ := os.ReadFile(outputFile)
 	output = string(outputBytes)
 	stderrBytes, _ := os.ReadFile(stderrFile)
 	userStderr := strings.TrimSpace(string(stderrBytes))
 
 	if err != nil {
-		// Analyze the exit code to determine the error type.
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			ws := exitErr.Sys().(syscall.WaitStatus)
 			exitCode := ws.ExitStatus()
 
-			// nsjail specific exit codes for TLE/MLE can be found in its documentation.
-			// E.g., POSIX exit code for timeout is often 124, nsjail might use others.
-			// SIGKILL (9) or SIGXCPU (24) can indicate TLE.
-			// SIGSEGV (11) can indicate MLE or other runtime errors.
-			switch exitCode {
-			case 109: // Corresponds to SIGXCPU from nsjail, likely TLE
-				return "", timeLimit * 1000, 0, fmt.Errorf("Time Limit Exceeded")
-			case 137: // Corresponds to SIGKILL, could be OOM killer
-				return "", execTimeMs, 0, fmt.Errorf("Memory Limit Exceeded")
-			default:
-				errMsg := fmt.Sprintf("Runtime Error (Exit Code %d)", exitCode)
-				if userStderr != "" {
-					errMsg = fmt.Sprintf("%s: %s", errMsg, userStderr)
+			// Exit codes from nsjail can indicate specific errors
+			// These are standard signals: 128 + signal number
+			// SIGXCPU (24) -> TLE -> 128 + 24 = 152
+			// SIGKILL (9)  -> OOM -> 128 + 9  = 137
+			if ws.Signaled() {
+				sig := ws.Signal()
+				if sig == syscall.SIGXCPU {
+					return "", timeLimit * 1000, 0, fmt.Errorf("Time Limit Exceeded")
 				}
-				return "", execTimeMs, 0, fmt.Errorf(errMsg)
+				if sig == syscall.SIGKILL {
+					return "", execTimeMs, 0, fmt.Errorf("Memory Limit Exceeded or other fatal error")
+				}
 			}
+
+			errMsg := fmt.Sprintf("Runtime Error (Exit Code %d)", exitCode)
+			if userStderr != "" {
+				errMsg = fmt.Sprintf("%s: %s", errMsg, userStderr)
+			}
+			return "", execTimeMs, 0, fmt.Errorf(errMsg)
 		}
-		// A different kind of error (e.g., nsjail config error).
 		return "", execTimeMs, 0, fmt.Errorf("sandbox execution failed: %w (nsjail stderr: %s)", err, nsjailStderr.String())
 	}
 
-	// TODO: Parse memory usage. This is more complex with nsjail and might require cgroup v2 memory.stat.
-	// For now, we return 0.
 	log.Printf("Execution success for submission %s. Time: %dms", submissionID, execTimeMs)
 	return output, execTimeMs, 0, nil
 }
