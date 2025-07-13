@@ -8,52 +8,36 @@ RUN go mod download
 
 COPY . .
 
-# Build the main daemon
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/bin/daemon ./cmd/daemon/main.go
+# Build the main daemon for a Linux environment
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/bin/daemon ./cmd/daemon/main.go \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/bin/unsupported ./internal/runner/sandbox_unsupported.go
 
-# --------- Stage 2: Build nsjail ---------
-FROM ubuntu:22.04 AS nsjail_builder
-
-# Install nsjail dependencies
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    git \
-    g++ \
-    make \
-    flex \
-    bison \
-    libprotobuf-dev \
-    protobuf-compiler \
-    libnl-3-dev \
-    libnl-route-3-dev \
-    pkg-config
-
-# Clone and build nsjail
-RUN git clone --depth 1 https://github.com/google/nsjail.git /nsjail_src
-WORKDIR /nsjail_src
-RUN make
-
-# --------- Stage 3: Runtime ---------
+# --------- Stage 2: Final Runtime Image ---------
 FROM ubuntu:22.04
 
 WORKDIR /app
 
-# Install runtime dependencies (compilers, etc.)
+# Install runtime dependencies: compilers and firejail
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     g++ \
     python3 \
-    time \
-    ca-certificates
+    firejail
+
+# Create a dummy source file for the ldd check
+RUN echo 'int main() { return 0; }' > /tmp/main.cpp
+# Compile it
+RUN g++ /tmp/main.cpp -o /tmp/main.out -O2 -static -Wall
+#
+# --- DIAGNOSTIC STEP ---
+# Run ldd to check for dynamic dependencies. This will show us if "-static" is truly static.
+# If this command shows anything other than "not a dynamic executable", our theory is correct.
+RUN echo "--- Running ldd on the static executable ---" && ldd /tmp/main.out || true
+#
+#
 
 # Copy the compiled Go application from the 'builder' stage
 COPY --from=builder /app/bin/daemon /app/daemon
-
-# Copy the compiled nsjail binary from the 'nsjail_builder' stage
-COPY --from=nsjail_builder /nsjail_src/nsjail /usr/local/bin/nsjail
-
-# Copy the nsjail configuration file
-COPY nsjail.cfg /etc/nsjail.cfg
 
 # Set the entrypoint
 CMD ["/app/daemon"]
