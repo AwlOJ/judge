@@ -8,13 +8,11 @@ RUN go mod download
 
 COPY . .
 
-# Build the main daemon
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/bin/daemon ./cmd/daemon/main.go
 
 # --------- Stage 2: Build nsjail ---------
 FROM ubuntu:22.04 AS nsjail_builder
 
-# Install nsjail dependencies
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     git \
@@ -28,7 +26,6 @@ RUN apt-get update && \
     libnl-route-3-dev \
     pkg-config
 
-# Clone and build nsjail
 RUN git clone --depth 1 https://github.com/google/nsjail.git /nsjail_src
 WORKDIR /nsjail_src
 RUN make
@@ -38,8 +35,6 @@ FROM ubuntu:22.04
 
 WORKDIR /app
 
-# Install runtime dependencies (compilers, etc.)
-# We need g++, python3, and the 'time' utility which provides /usr/bin/time
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     g++ \
@@ -47,14 +42,13 @@ RUN apt-get update && \
     time \
     ca-certificates
 
-# Copy the compiled Go application from the 'builder' stage
 COPY --from=builder /app/bin/daemon /app/daemon
 
-# Copy the compiled nsjail binary from the 'nsjail_builder' stage
 COPY --from=nsjail_builder /nsjail_src/nsjail /usr/local/bin/nsjail
 
 # Copy runtime assets (if any)
 # COPY --from=builder /app/config /app/config
 
-# Set the entrypoint
 CMD ["/app/daemon"]
+
+#iukuyenn&haanhh:3
