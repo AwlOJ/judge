@@ -186,7 +186,8 @@ func processJob(ctx context.Context, job *queue.JobPayload, storeInstance *store
 			} else if strings.Contains(errMsg, "Memory Limit Exceeded") {
 				finalStatus = "Memory Limit Exceeded"
 			}
-			log.Printf("Submission %s - Test case %d failed with status: %s", job.SubmissionID, i+1, finalStatus)
+			// THIS IS THE CRITICAL CHANGE - LOG THE ACTUAL ERROR
+			log.Printf("Submission %s - Test case %d failed with status: %s. Reason: %v", job.SubmissionID, i+1, finalStatus, runtimeErr)
 			updateResult(finalStatus, int64(execTimeMs), maxMemoryUsedKb)
 			return nil // Stop processing and return
 		}
