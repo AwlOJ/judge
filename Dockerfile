@@ -25,7 +25,8 @@ RUN apt-get update && \
     libprotobuf-dev \
     protobuf-compiler \
     libnl-3-dev \
-    libnl-route-3-dev
+    libnl-route-3-dev \
+    pkg-config
 
 # Clone and build nsjail
 RUN git clone --depth 1 https://github.com/google/nsjail.git /nsjail_src
