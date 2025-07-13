@@ -1,8 +1,8 @@
-name: Build Judge-Service(docker)
+name: Build Judge-Service(nsjail)
 
 on:
   push:
-    branches: [docker]
+    branches: [nsjail]
 
 jobs:
   build-and-push:
