@@ -129,6 +129,7 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 		"--quiet",
 		"--noprofile",                          // Start with a clean slate, no default profiles.
 		"--net=none",                           // No network access.
+		"--private",                            // Isolate the filesystem.
 		fmt.Sprintf("--whitelist=%s", tempDir), // CRITICAL: Only allow access to our temporary directory.
 		fmt.Sprintf("--rlimit-cpu=%d", timeLimit),
 		fmt.Sprintf("--rlimit-as=%d", memoryLimit*1024*1024),
