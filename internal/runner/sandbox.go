@@ -12,13 +12,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-
-	"judge-service/internal/store"
 )
 
-// Runner handles the execution of code within a secure sandbox using nsjail.
+// Runner handles the execution of code within a secure sandbox using firejail.
 type Runner struct {
 	LangConfig map[string]struct {
 		CompilerPath       string
@@ -27,20 +24,18 @@ type Runner struct {
 		SourceFileName     string
 		ExecutableFileName string
 	}
-	NsjailPath        string
-	NsjailConfigPath  string
+	FirejailPath string
 }
 
 // NewRunner creates a new Runner instance.
 func NewRunner() (*Runner, error) {
-	nsjailPath, err := exec.LookPath("nsjail")
+	firejailPath, err := exec.LookPath("firejail")
 	if err != nil {
-		return nil, fmt.Errorf("nsjail executable not found in PATH: %w", err)
+		return nil, fmt.Errorf("firejail executable not found in PATH: %w. Make sure it is installed", err)
 	}
 
 	return &Runner{
-		NsjailPath:        nsjailPath,
-		NsjailConfigPath:  "/etc/nsjail.cfg", // Standard path for our config
+		FirejailPath: firejailPath,
 		LangConfig: map[string]struct {
 			CompilerPath       string
 			CompileCmd         []string
@@ -51,14 +46,14 @@ func NewRunner() (*Runner, error) {
 			"cpp": {
 				CompilerPath:       "/usr/bin/g++",
 				CompileCmd:         []string{"/usr/bin/g++", "main.cpp", "-o", "main.out", "-O2", "-static", "-Wall"},
-				RunCmd:             []string{"/app/main.out"},
+				RunCmd:             []string{"./main.out"}, // Relative to the tempDir
 				SourceFileName:     "main.cpp",
 				ExecutableFileName: "main.out",
 			},
 			"python": {
-				CompilerPath:       "", // Not a compiled language
+				CompilerPath:       "",
 				CompileCmd:         nil,
-				RunCmd:             []string{"/usr/bin/python3", "/app/main.py"},
+				RunCmd:             []string{"python3", "./main.py"},
 				SourceFileName:     "main.py",
 				ExecutableFileName: "",
 			},
@@ -96,7 +91,7 @@ func (r *Runner) Compile(ctx context.Context, submissionID string, lang string, 
 
 	if config.CompileCmd == nil {
 		log.Printf("Language %s is interpreted, no compilation needed.", lang)
-		return config.SourceFileName, nil
+		return filepath.Join(tempDir, config.SourceFileName), nil
 	}
 
 	cmd := exec.CommandContext(ctx, config.CompilerPath, config.CompileCmd[1:]...)
@@ -117,7 +112,7 @@ func (r *Runner) Compile(ctx context.Context, submissionID string, lang string, 
 	return executablePath, nil
 }
 
-// Execute runs the code against a single test case using nsjail.
+// Execute runs the code against a single test case using firejail.
 func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath string, testCase *store.TestCase, timeLimit int, memoryLimit int) (output string, execTimeMs int, memoryUsedKb int, runtimeErr error) {
 	config, ok := r.LangConfig[lang]
 	if !ok {
@@ -125,85 +120,53 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 	}
 
 	tempDir := filepath.Dir(executablePath)
-	
-	inputFile := filepath.Join(tempDir, "input.txt")
-	outputFile := filepath.Join(tempDir, "output.txt")
-	stderrFile := filepath.Join(tempDir, "stderr.txt")
 
-	if err := os.WriteFile(inputFile, []byte(testCase.Input), 0644); err != nil {
-		return "", 0, 0, fmt.Errorf("failed to write input file: %w", err)
-	}
-	os.WriteFile(outputFile, []byte{}, 0644)
-	os.WriteFile(stderrFile, []byte{}, 0644)
-
-	// --- Build the nsjail command ---
+	// --- Build the firejail command ---
+	// firejail is much simpler. It creates a temporary, isolated environment.
 	args := []string{
-		"--config", r.NsjailConfigPath,
-		// Override specific limits from the config file
-		"--time_limit", strconv.Itoa(timeLimit),
-		"--rlimit_as", strconv.Itoa(memoryLimit), // in MB
-		
-		// THE FIX: Map the container's root user (0) to the sandbox's root user (0).
-		// This gives the sandboxed process permission to execute the file.
-		"--uid_mapping", "0:0:1",
-		"--gid_mapping", "0:0:1",
-
-		// Mount the temporary user code directory as read-write
-		"--bindmount", fmt.Sprintf("%s:/app", tempDir),
-		"--cwd", "/app",
-		"--stdin", "/app/input.txt",
-		"--stdout", "/app/output.txt",
-		"--stderr", "/app/stderr.txt",
+		"--quiet",              // Suppress verbose output
+		"--private=" + tempDir, // Create a temporary home directory based on our tempDir
+		"--net=none",           // Disable networking
+		fmt.Sprintf("--rlimit-cpu=%d", timeLimit),   // CPU time limit in seconds
+		fmt.Sprintf("--rlimit-as=%d", memoryLimit*1024*1024), // Memory limit in bytes
 	}
-	
-	args = append(args, "--")
-	args = append(args, config.RunCmd...)
 
-	cmd := exec.CommandContext(ctx, r.NsjailPath, args...)
+	// The command to run inside the sandbox. We use `timeout` for an extra layer of time limit protection.
+	timeoutCmd := fmt.Sprintf("timeout %d %s", timeLimit, strings.Join(config.RunCmd, " "))
+	args = append(args, "bash", "-c", timeoutCmd)
 	
-	var nsjailStderr bytes.Buffer
-	cmd.Stderr = &nsjailStderr
+	cmd := exec.CommandContext(ctx, r.FirejailPath, args...)
+
+	// Provide the test case input via stdin
+	cmd.Stdin = strings.NewReader(testCase.Input)
 	
-	log.Printf("Running nsjail command: %s %s", r.NsjailPath, strings.Join(args, " "))
+	// Capture stdout and stderr
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	log.Printf("Running firejail command: %s %s", r.FirejailPath, strings.Join(args, " "))
 	
 	startTime := time.Now()
 	err := cmd.Run()
 	duration := time.Since(startTime)
 	execTimeMs = int(duration.Milliseconds())
 
-	outputBytes, _ := os.ReadFile(outputFile)
-	output = string(outputBytes)
-	stderrBytes, _ := os.ReadFile(stderrFile)
-	userStderr := strings.TrimSpace(string(stderrBytes))
-
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			ws := exitErr.Sys().(syscall.WaitStatus)
-			exitCode := ws.ExitStatus()
-
-			if ws.Signaled() {
-				sig := ws.Signal()
-				if sig == syscall.SIGXCPU {
-					return "", timeLimit * 1000, 0, fmt.Errorf("Time Limit Exceeded")
-				}
-				if sig == syscall.SIGKILL {
-					return "", execTimeMs, 0, fmt.Errorf("Memory Limit Exceeded or other fatal error")
-				}
-			}
-
-			errMsg := fmt.Sprintf("Runtime Error (Exit Code %d)", exitCode)
-			if userStderr != "" {
-				errMsg = fmt.Sprintf("%s: %s", errMsg, userStderr)
-			}
-			return "", execTimeMs, 0, fmt.Errorf(errMsg)
+		errMsg := ""
+		// Check for timeout from our `timeout` command
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 124 {
+			errMsg = "Time Limit Exceeded"
+		} else {
+			// Other runtime errors
+			errMsg = fmt.Sprintf("Runtime Error: %s", stderr.String())
 		}
-		return "", execTimeMs, 0, fmt.Errorf("sandbox execution failed: %w (nsjail stderr: %s)", err, nsjailStderr.String())
+		return "", execTimeMs, 0, fmt.Errorf(errMsg)
 	}
 
 	log.Printf("Execution success for submission %s. Time: %dms", submissionID, execTimeMs)
-	return output, execTimeMs, 0, nil
+	return stdout.String(), execTimeMs, 0, nil
 }
-
 
 // CleanupEnvironment removes the temporary directory.
 func (r *Runner) CleanupEnvironment(tempDir string) error {
