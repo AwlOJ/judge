@@ -142,6 +142,12 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 		// Override specific limits from the config file
 		"--time_limit", strconv.Itoa(timeLimit),
 		"--rlimit_as", strconv.Itoa(memoryLimit), // in MB
+		
+		// THE FIX: Map the container's root user (0) to the sandbox's root user (0).
+		// This gives the sandboxed process permission to execute the file.
+		"--uid_mapping", "0:0:1",
+		"--gid_mapping", "0:0:1",
+
 		// Mount the temporary user code directory as read-write
 		"--bindmount", fmt.Sprintf("%s:/app", tempDir),
 		"--cwd", "/app",
