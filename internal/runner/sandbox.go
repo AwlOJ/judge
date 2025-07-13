@@ -1,3 +1,5 @@
+//go:build linux
+
 package runner
 
 import (
@@ -121,7 +123,7 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 	}
 
 	tempDir := filepath.Dir(executablePath)
-	
+
 	// Define paths for I/O files
 	inputFile := filepath.Join(tempDir, "input.txt")
 	outputFile := filepath.Join(tempDir, "output.txt")
@@ -134,7 +136,6 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 	// Create empty output/stderr files so nsjail can write to them
 	os.WriteFile(outputFile, []byte{}, 0644)
 	os.WriteFile(stderrFile, []byte{}, 0644)
-
 
 	// --- Build the nsjail command ---
 	args := []string{
@@ -155,18 +156,18 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 		"--stdout", "/app/output.txt",
 		"--stderr", "/app/stderr.txt",
 	}
-	
+
 	// Add the actual command to run inside nsjail
 	args = append(args, "--")
 	args = append(args, config.RunCmd...)
 
 	cmd := exec.CommandContext(ctx, r.NsjailPath, args...)
-	
+
 	var nsjailStderr bytes.Buffer
 	cmd.Stderr = &nsjailStderr
-	
+
 	log.Printf("Running nsjail command: %s %s", r.NsjailPath, strings.Join(args, " "))
-	
+
 	startTime := time.Now()
 	err := cmd.Run()
 	duration := time.Since(startTime)
@@ -208,7 +209,6 @@ func (r *Runner) Execute(ctx context.Context, submissionID, lang, executablePath
 	log.Printf("Execution success for submission %s. Time: %dms", submissionID, execTimeMs)
 	return output, execTimeMs, 0, nil
 }
-
 
 // CleanupEnvironment removes the temporary directory.
 func (r *Runner) CleanupEnvironment(tempDir string) error {
