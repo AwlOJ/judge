@@ -8,12 +8,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Yawn-Sean/project-judger/internal/config"
-	"github.com/Yawn-Sean/project-judger/internal/core"
-	"github.com/Yawn-Sean/project-judger/internal/models"
-	"github.com/Yawn-Sean/project-judger/internal/queue"
-	"github.com/Yawn-Sean/project-judger/internal/runner"
-	"github.com/Yawn-Sean/project-judger/internal/store"
+	"judge-service/internal/config"
+	"judge-service/internal/core"
+	"judge-service/internal/queue"
+	"judge-service/internal/runner"
+	"judge-service/internal/store"
+
 	"github.com/joho/godotenv"
 )
 
@@ -58,7 +58,7 @@ func main() {
 	}
 	runnerInstance := runner.NewRunner(ctx, langConfig)
 
-	jobHandler := func(ctx context.Context, payload *models.SubmissionPayload) error {
+	jobHandler := func(ctx context.Context, payload *store.SubmissionPayload) error {
 		return processJob(ctx, payload, storeInstance, runnerInstance)
 	}
 
@@ -72,7 +72,7 @@ func main() {
 	log.Println("Judge daemon stopped.")
 }
 
-func processJob(ctx context.Context, payload *models.SubmissionPayload, s *store.MongoStore, r *runner.Runner) error {
+func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.MongoStore, r *runner.Runner) error {
 	log.Printf("Processing submission ID: %s", payload.SubmissionID)
 
 	var tempDir string
@@ -82,7 +82,7 @@ func processJob(ctx context.Context, payload *models.SubmissionPayload, s *store
 		}
 	}()
 
-	err := s.UpdateSubmissionStatus(ctx, payload.SubmissionID, models.StatusJudging)
+	err := s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusJudging)
 	if err != nil {
 		log.Printf("Failed to update submission %s status to Judging: %v", payload.SubmissionID, err)
 	}
@@ -90,32 +90,32 @@ func processJob(ctx context.Context, payload *models.SubmissionPayload, s *store
 	submission, err := s.GetSubmission(ctx, payload.SubmissionID)
 	if err != nil {
 		log.Printf("Error fetching submission %s: %v", payload.SubmissionID, err)
-		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, models.StatusInternalError)
+		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusInternalError)
 	}
 
 	problem, err := s.GetProblem(ctx, submission.ProblemID)
 	if err != nil {
 		log.Printf("Error fetching problem %s for submission %s: %v", submission.ProblemID, payload.SubmissionID, err)
-		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, models.StatusInternalError)
+		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusInternalError)
 	}
 
 	tempDir, err = r.PrepareEnvironment(payload.SubmissionID, submission.SourceCode, submission.Language)
 	if err != nil {
 		log.Printf("Error preparing environment for %s: %v", payload.SubmissionID, err)
-		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, models.StatusInternalError)
+		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusInternalError)
 	}
 
 	executablePath, compileOutput, err := r.Compile(tempDir, submission.Language)
 	if err != nil {
 		log.Printf("Compilation failed for %s: %v", payload.SubmissionID, err)
-		result := models.SubmissionResult{
-			Status:        models.StatusCompilationError,
+		result := store.SubmissionResult{
+			Status:        store.StatusCompilationError,
 			CompileOutput: compileOutput,
 		}
 		return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
 	}
 
-	var finalStatus = models.StatusAccepted
+	var finalStatus = store.StatusAccepted
 	var totalExecTimeMs int
 	var maxMemoryUsedKb uint64
 
@@ -129,10 +129,10 @@ func processJob(ctx context.Context, payload *models.SubmissionPayload, s *store
 		}
 		totalExecTimeMs += execResult.ExecutionTimeMs
 
-		if execResult.Status != models.StatusCompleted {
+		if execResult.Status != store.StatusCompleted {
 			finalStatus = execResult.Status // TLE, Runtime Error, etc.
 			log.Printf("Submission %s - Test case %d failed with status: %s. Error: %s", payload.SubmissionID, i+1, finalStatus, execResult.Error)
-			result := models.SubmissionResult{
+			result := store.SubmissionResult{
 				Status:          finalStatus,
 				ExecutionTimeMs: execResult.ExecutionTimeMs,
 				MemoryUsedKb:    execResult.MemoryUsedKb,
@@ -141,9 +141,9 @@ func processJob(ctx context.Context, payload *models.SubmissionPayload, s *store
 		}
 
 		if !core.CompareOutputs(execResult.Output, testCase.Output) {
-			finalStatus = models.StatusWrongAnswer
+			finalStatus = store.StatusWrongAnswer
 			log.Printf("Submission %s - Test case %d: Wrong Answer", payload.SubmissionID, i+1)
-			result := models.SubmissionResult{
+			result := store.SubmissionResult{
 				Status:          finalStatus,
 				ExecutionTimeMs: execResult.ExecutionTimeMs,
 				MemoryUsedKb:    maxMemoryUsedKb,
@@ -155,7 +155,7 @@ func processJob(ctx context.Context, payload *models.SubmissionPayload, s *store
 
 	avgExecTimeMs := totalExecTimeMs / len(problem.TestCases)
 
-	finalResult := models.SubmissionResult{
+	finalResult := store.SubmissionResult{
 		Status:          finalStatus,
 		ExecutionTimeMs: avgExecTimeMs,
 		MemoryUsedKb:    maxMemoryUsedKb,

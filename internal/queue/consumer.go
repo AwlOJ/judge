@@ -6,14 +6,9 @@ import (
 	"log"
 	"time"
 
+	"judge-service/internal/store"
 	"github.com/redis/go-redis/v9"
 )
-
-// JobPayload represents the structure of a job in the queue.
-// In our case, it contains the submission ID.
-type JobPayload struct {
-	SubmissionID string `json:"submissionId"`
-}
 
 // Consumer is responsible for listening to the Redis queue.
 type Consumer struct {
@@ -21,66 +16,71 @@ type Consumer struct {
 	QueueName string
 }
 
-// NewConsumer creates a new queue consumer.
-func NewConsumer(rdb *redis.Client, queueName string) *Consumer {
+// NewConsumer creates a new queue consumer and pings the Redis server.
+func NewConsumer(redisURL string, queueName string) (*Consumer, error) {
+	opt, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, err
+	}
+	rdb := redis.NewClient(opt)
+
+	// Ping the server to ensure connection is alive
+	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+		return nil, err
+	}
+
 	return &Consumer{
 		RDB:       rdb,
 		QueueName: queueName,
-	}
+	}, nil
 }
 
 // Start begins listening for jobs on the configured Redis queue.
-// It takes a job handler function that will be called for each received job.
-func (c *Consumer) Start(ctx context.Context, handler func(context.Context, *JobPayload) error) {
+func (c *Consumer) Start(ctx context.Context, handler func(context.Context, *store.SubmissionPayload) error) {
 	log.Printf("[*] Waiting for jobs on queue %s", c.QueueName)
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Consumer context done. Stopping.")
-			return // Exit loop if context is cancelled
+			return
 		default:
-			// BLPOP command to pop a job from the list, with a 0 timeout for blocking
+			// Pop a job from the list, with a 0 timeout for blocking
 			result, err := c.RDB.BLPop(ctx, 0, c.QueueName).Result()
 			if err != nil {
-				// Handle context cancellation specifically
-				if err == context.Canceled {
-					log.Println("Redis BLPOP cancelled.")
-					return
+				if err == context.Canceled || err == redis.Nil {
+					return // Normal exit condition
 				}
 				log.Printf("Error receiving from Redis: %v", err)
-				time.Sleep(1 * time.Second) // Prevent busy-loop on error
+				time.Sleep(1 * time.Second) // Prevent busy-looping on other errors
 				continue
 			}
 
-			// result[0] is the key, result[1] is the value (the job data string)
 			if len(result) < 2 {
-				log.Printf("Received malformed message: %v", result)
 				continue
 			}
 
 			jobDataString := result[1]
 			log.Printf("Received job data: %s", jobDataString)
 
-			// Parse the job data (assuming JSON payload like { "submissionId": "..." })
-			var jobPayload JobPayload
-			err = json.Unmarshal([]byte(jobDataString), &jobPayload)
-			if err != nil {
+			var payload store.SubmissionPayload
+			if err := json.Unmarshal([]byte(jobDataString), &payload); err != nil {
 				log.Printf("Error unmarshalling job data %s: %v", jobDataString, err)
-				// In a real system, you might move this to a dead-letter queue
+				continue
+			}
+			
+			// A submission ID must be present
+			if payload.SubmissionID == "" {
+				log.Println("Received job with empty submission ID.")
 				continue
 			}
 
-			// Handle the job
-			log.Printf("Processing submission ID: %s", jobPayload.SubmissionID)
-			err = handler(ctx, &jobPayload)
-			if err != nil {
-				log.Printf("Error handling job for submission %s: %v", jobPayload.SubmissionID, err)
-				// Depending on the error, you might retry or move to a dead-letter queue
+			if err := handler(ctx, &payload); err != nil {
+				log.Printf("Error handling job for submission %s: %v", payload.SubmissionID, err)
 				continue
 			}
 
-			log.Printf("Finished processing submission ID: %s", jobPayload.SubmissionID)
+			log.Printf("Finished processing submission ID: %s", payload.SubmissionID)
 		}
 	}
 }
