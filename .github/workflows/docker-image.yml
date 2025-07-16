@@ -1,8 +1,8 @@
-name: Build Judge-Service(firejail)
+name: Build Judge-Service(NoSandBox)
 
 on:
   push:
-    branches: [firejail]
+    branches: [NoSandBox]
 
 jobs:
   build-and-push:
