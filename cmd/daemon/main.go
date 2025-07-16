@@ -5,21 +5,19 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"judge-service/internal/core"
-	"judge-service/internal/queue"
-	"judge-service/internal/runner"
-	"judge-service/internal/store"
-
+	"github.com/Yawn-Sean/project-judger/internal/config"
+	"github.com/Yawn-Sean/project-judger/internal/core"
+	"github.com/Yawn-Sean/project-judger/internal/models"
+	"github.com/Yawn-Sean/project-judger/internal/queue"
+	"github.com/Yawn-Sean/project-judger/internal/runner"
+	"github.com/Yawn-Sean/project-judger/internal/store"
 	"github.com/joho/godotenv"
-	"github.com/redis/go-redis/v9"
 )
 
 func init() {
-	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found or error loading .env file")
 	}
@@ -29,41 +27,21 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// --- Graceful Shutdown Setup ---
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// --- Configuration ---
-	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
-		log.Fatal("REDIS_URL environment variable not set")
-	}
-	queueName := os.Getenv("REDIS_QUEUE_NAME")
-	if queueName == "" {
-		queueName = "submission_queue"
-	}
-	mongoURI := os.Getenv("MONGO_URI")
-	if mongoURI == "" {
-		log.Fatal("MONGO_URI environment variable not set")
-	}
-	mongoDBName := os.Getenv("MONGO_DB_NAME")
-	if mongoDBName == "" {
-		log.Fatal("MONGO_DB_NAME environment variable not set")
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// --- Connect to Redis ---
-	opt, err := redis.ParseURL(redisURL)
+	consumer, err := queue.NewConsumer(cfg.RedisURL, cfg.RedisQueueName)
 	if err != nil {
-		log.Fatalf("Error parsing Redis URL: %v", err)
-	}
-	rdb := redis.NewClient(opt)
-	if _, err := rdb.Ping(ctx).Result(); err != nil {
-		log.Fatalf("Could not connect to Redis: %v", err)
+		log.Fatalf("Could not initialize queue consumer: %v", err)
 	}
 	log.Println("Successfully connected to Redis.")
 
-	// --- Connect to MongoDB ---
-	storeInstance, err := store.NewStore(ctx, mongoURI, mongoDBName)
+	storeInstance, err := store.NewMongoStore(ctx, cfg.MongoURI, cfg.MongoDBName)
 	if err != nil {
 		log.Fatalf("Could not connect to MongoDB: %v", err)
 	}
@@ -74,139 +52,114 @@ func main() {
 	}()
 	log.Println("Successfully connected to MongoDB.")
 
-	// --- Create Runner ---
-	runnerInstance, err := runner.NewRunner()
+	langConfig, err := config.LoadLanguageConfig()
 	if err != nil {
-		log.Fatalf("Failed to create runner: %v", err)
+		log.Fatalf("Failed to load language configurations: %v", err)
+	}
+	runnerInstance := runner.NewRunner(ctx, langConfig)
+
+	jobHandler := func(ctx context.Context, payload *models.SubmissionPayload) error {
+		return processJob(ctx, payload, storeInstance, runnerInstance)
 	}
 
-	// --- Create and Start Queue Consumer ---
-	consumer := queue.NewConsumer(rdb, queueName)
-
-	// Define the job handler function
-	jobHandler := func(ctx context.Context, job *queue.JobPayload) error {
-		return processJob(ctx, job, storeInstance, runnerInstance)
-	}
-
-	// Start the consumer in a goroutine
 	go consumer.Start(ctx, jobHandler)
 
-	// --- Wait for shutdown signal ---
 	<-stopChan
 	log.Println("Shutdown signal received, gracefully stopping...")
-	cancel() // Trigger context cancellation
+	cancel()
 
-	// Give some time for the consumer to stop cleanly.
 	time.Sleep(2 * time.Second)
-
 	log.Println("Judge daemon stopped.")
 }
 
-func processJob(ctx context.Context, job *queue.JobPayload, storeInstance *store.Store, runnerInstance *runner.Runner) error {
-	log.Printf("Handling job for submission ID: %s", job.SubmissionID)
+func processJob(ctx context.Context, payload *models.SubmissionPayload, s *store.MongoStore, r *runner.Runner) error {
+	log.Printf("Processing submission ID: %s", payload.SubmissionID)
 
-	var tempDir string // Define tempDir here to make it accessible for deferred cleanup
-
-	// Use a named function for deferred cleanup to avoid capturing loop variables.
+	var tempDir string
 	defer func() {
 		if tempDir != "" {
-			if cleanupErr := runnerInstance.CleanupEnvironment(tempDir); cleanupErr != nil {
-				log.Printf("Error cleaning up temp directory %s: %v", tempDir, cleanupErr)
-			}
+			r.CleanUp(tempDir)
 		}
 	}()
 
-	updateStatus := func(status string) {
-		if err := storeInstance.UpdateSubmissionStatus(ctx, job.SubmissionID, status); err != nil {
-			log.Printf("Failed to update submission %s status to %s: %v", job.SubmissionID, status, err)
+	err := s.UpdateSubmissionStatus(ctx, payload.SubmissionID, models.StatusJudging)
+	if err != nil {
+		log.Printf("Failed to update submission %s status to Judging: %v", payload.SubmissionID, err)
+	}
+
+	submission, err := s.GetSubmission(ctx, payload.SubmissionID)
+	if err != nil {
+		log.Printf("Error fetching submission %s: %v", payload.SubmissionID, err)
+		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, models.StatusInternalError)
+	}
+
+	problem, err := s.GetProblem(ctx, submission.ProblemID)
+	if err != nil {
+		log.Printf("Error fetching problem %s for submission %s: %v", submission.ProblemID, payload.SubmissionID, err)
+		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, models.StatusInternalError)
+	}
+
+	tempDir, err = r.PrepareEnvironment(payload.SubmissionID, submission.SourceCode, submission.Language)
+	if err != nil {
+		log.Printf("Error preparing environment for %s: %v", payload.SubmissionID, err)
+		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, models.StatusInternalError)
+	}
+
+	executablePath, compileOutput, err := r.Compile(tempDir, submission.Language)
+	if err != nil {
+		log.Printf("Compilation failed for %s: %v", payload.SubmissionID, err)
+		result := models.SubmissionResult{
+			Status:        models.StatusCompilationError,
+			CompileOutput: compileOutput,
 		}
-	}
-	updateResult := func(status string, execTimeMs, memoryUsedKb int64) {
-		if err := storeInstance.UpdateSubmissionResult(ctx, job.SubmissionID, status, execTimeMs, memoryUsedKb); err != nil {
-			log.Printf("Failed to update submission %s result to %s: %v", job.SubmissionID, status, err)
-		}
+		return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
 	}
 
-	updateStatus("Judging")
-
-	// 1. Fetch data from MongoDB
-	submission, err := storeInstance.FetchSubmission(ctx, job.SubmissionID)
-	if err != nil {
-		log.Printf("Error fetching submission %s: %v", job.SubmissionID, err)
-		updateStatus("Internal Error")
-		return nil // Acknowledge the job, don't retry if data is missing
-	}
-
-	problem, err := storeInstance.FetchProblem(ctx, submission.ProblemID.Hex())
-	if err != nil {
-		log.Printf("Error fetching problem %s for submission %s: %v", submission.ProblemID.Hex(), job.SubmissionID, err)
-		updateStatus("Internal Error")
-		return nil // Acknowledge the job
-	}
-
-	// 2. Prepare the environment
-	tempDir, err = runnerInstance.PrepareEnvironment(job.SubmissionID, submission.Code, submission.Language)
-	if err != nil {
-		log.Printf("Error preparing environment for submission %s: %v", job.SubmissionID, err)
-		updateStatus("Internal Error")
-		return nil // Acknowledge the job
-	}
-
-	// 3. Compile the code
-	executablePath, compileErr := runnerInstance.Compile(ctx, job.SubmissionID, submission.Language, tempDir)
-	if compileErr != nil {
-		log.Printf("Compilation failed for submission %s: %v", job.SubmissionID, compileErr)
-		updateResult("Compilation Error", 0, 0)
-		return nil // Acknowledge the job
-	}
-
-	// 4. Execute against test cases
-	var finalStatus = "Accepted"
-	var totalExecTimeMs int64 = 0
-	var maxMemoryUsedKb int64 = 0
+	var finalStatus = models.StatusAccepted
+	var totalExecTimeMs int
+	var maxMemoryUsedKb uint64
 
 	for i, testCase := range problem.TestCases {
-		log.Printf("Running test case %d for submission %s...", i+1, job.SubmissionID)
+		log.Printf("Running test case %d for submission %s...", i+1, payload.SubmissionID)
 
-		output, execTimeMs, memoryUsedKb, runtimeErr := runnerInstance.Execute(
-			ctx, job.SubmissionID, submission.Language, executablePath, &testCase,
-			problem.TimeLimit, problem.MemoryLimit,
-		)
+		execResult := r.Execute(executablePath, testCase, problem.TimeLimitMs, problem.MemoryLimitMb)
 
-		totalExecTimeMs += int64(execTimeMs)
-		if int64(memoryUsedKb) > maxMemoryUsedKb {
-			maxMemoryUsedKb = int64(memoryUsedKb)
+		if execResult.MemoryUsedKb > maxMemoryUsedKb {
+			maxMemoryUsedKb = execResult.MemoryUsedKb
 		}
+		totalExecTimeMs += execResult.ExecutionTimeMs
 
-		if runtimeErr != nil {
-			finalStatus = "Runtime Error" // Default
-			errMsg := runtimeErr.Error()
-			if strings.Contains(errMsg, "Time Limit Exceeded") {
-				finalStatus = "Time Limit Exceeded"
-			} else if strings.Contains(errMsg, "Memory Limit Exceeded") {
-				finalStatus = "Memory Limit Exceeded"
+		if execResult.Status != models.StatusCompleted {
+			finalStatus = execResult.Status // TLE, Runtime Error, etc.
+			log.Printf("Submission %s - Test case %d failed with status: %s. Error: %s", payload.SubmissionID, i+1, finalStatus, execResult.Error)
+			result := models.SubmissionResult{
+				Status:          finalStatus,
+				ExecutionTimeMs: execResult.ExecutionTimeMs,
+				MemoryUsedKb:    execResult.MemoryUsedKb,
 			}
-			// THIS IS THE CRITICAL CHANGE - LOG THE ACTUAL ERROR
-			log.Printf("Submission %s - Test case %d failed with status: %s. Reason: %v", job.SubmissionID, i+1, finalStatus, runtimeErr)
-			updateResult(finalStatus, int64(execTimeMs), maxMemoryUsedKb)
-			return nil // Stop processing and return
+			return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
 		}
 
-		if !core.CompareOutputs(output, testCase.Output) {
-			log.Printf("Submission %s - Test case %d: Wrong Answer", job.SubmissionID, i+1)
-			finalStatus = "Wrong Answer"
-			updateResult(finalStatus, totalExecTimeMs/int64(i+1), maxMemoryUsedKb)
-			return nil // Stop processing and return
+		if !core.CompareOutputs(execResult.Output, testCase.Output) {
+			finalStatus = models.StatusWrongAnswer
+			log.Printf("Submission %s - Test case %d: Wrong Answer", payload.SubmissionID, i+1)
+			result := models.SubmissionResult{
+				Status:          finalStatus,
+				ExecutionTimeMs: execResult.ExecutionTimeMs,
+				MemoryUsedKb:    maxMemoryUsedKb,
+			}
+			return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
 		}
-
-		log.Printf("Submission %s - Test case %d: Passed", job.SubmissionID, i+1)
+		log.Printf("Submission %s - Test case %d: Passed", payload.SubmissionID, i+1)
 	}
 
-	avgExecTimeMs := totalExecTimeMs / int64(len(problem.TestCases))
+	avgExecTimeMs := totalExecTimeMs / len(problem.TestCases)
 
-	// 5. Update final result
-	log.Printf("Finalizing submission %s with status: %s, Avg Time: %dms, Max Memory: %dKB", job.SubmissionID, finalStatus, avgExecTimeMs, maxMemoryUsedKb)
-	updateResult(finalStatus, avgExecTimeMs, maxMemoryUsedKb)
-
-	return nil
+	finalResult := models.SubmissionResult{
+		Status:          finalStatus,
+		ExecutionTimeMs: avgExecTimeMs,
+		MemoryUsedKb:    maxMemoryUsedKb,
+	}
+	log.Printf("Finalizing submission %s with status: %s, Avg Time: %dms, Max Memory: %dKB", payload.SubmissionID, finalStatus, avgExecTimeMs, maxMemoryUsedKb)
+	return s.UpdateSubmissionResult(ctx, payload.SubmissionID, finalResult)
 }
