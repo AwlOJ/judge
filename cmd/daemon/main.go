@@ -99,7 +99,8 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusInternalError)
 	}
 
-	tempDir, err = r.PrepareEnvironment(payload.SubmissionID, submission.SourceCode, submission.Language)
+	// FIX: Use the correct field 'submission.Code'
+	tempDir, err = r.PrepareEnvironment(payload.SubmissionID, submission.Code, submission.Language)
 	if err != nil {
 		log.Printf("Error preparing environment for %s: %v", payload.SubmissionID, err)
 		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusInternalError)
@@ -107,7 +108,7 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 
 	executablePath, compileOutput, err := r.Compile(tempDir, submission.Language)
 	if err != nil {
-		log.Printf("Compilation failed for %s: %v", payload.SubmissionID, err)
+		log.Printf("Compilation failed for %s. Compiler output: %s. Error: %v", payload.SubmissionID, compileOutput, err)
 		result := store.SubmissionResult{
 			Status:        store.StatusCompilationError,
 			CompileOutput: compileOutput,
@@ -122,7 +123,10 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 	for i, testCase := range problem.TestCases {
 		log.Printf("Running test case %d for submission %s...", i+1, payload.SubmissionID)
 
-		execResult := r.Execute(executablePath, testCase, problem.TimeLimitMs, problem.MemoryLimitMb)
+		// FIX: Convert time limit from seconds to milliseconds
+		timeLimitMs := problem.TimeLimit * 1000
+
+		execResult := r.Execute(executablePath, testCase, timeLimitMs, problem.MemoryLimit)
 
 		if execResult.MemoryUsedKb > maxMemoryUsedKb {
 			maxMemoryUsedKb = execResult.MemoryUsedKb
@@ -130,12 +134,12 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 		totalExecTimeMs += execResult.ExecutionTimeMs
 
 		if execResult.Status != store.StatusCompleted {
-			finalStatus = execResult.Status // TLE, Runtime Error, etc.
+			finalStatus = execResult.Status
 			log.Printf("Submission %s - Test case %d failed with status: %s. Error: %s", payload.SubmissionID, i+1, finalStatus, execResult.Error)
 			result := store.SubmissionResult{
-				Status:          finalStatus,
-				ExecutionTimeMs: execResult.ExecutionTimeMs,
-				MemoryUsedKb:    execResult.MemoryUsedKb,
+				Status:        finalStatus,
+				ExecutionTime: execResult.ExecutionTimeMs,
+				MemoryUsed:    execResult.MemoryUsedKb,
 			}
 			return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
 		}
@@ -144,21 +148,24 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 			finalStatus = store.StatusWrongAnswer
 			log.Printf("Submission %s - Test case %d: Wrong Answer", payload.SubmissionID, i+1)
 			result := store.SubmissionResult{
-				Status:          finalStatus,
-				ExecutionTimeMs: execResult.ExecutionTimeMs,
-				MemoryUsedKb:    maxMemoryUsedKb,
+				Status:        finalStatus,
+				ExecutionTime: execResult.ExecutionTimeMs,
+				MemoryUsed:    maxMemoryUsedKb,
 			}
 			return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
 		}
 		log.Printf("Submission %s - Test case %d: Passed", payload.SubmissionID, i+1)
 	}
 
-	avgExecTimeMs := totalExecTimeMs / len(problem.TestCases)
+	var avgExecTimeMs int
+	if len(problem.TestCases) > 0 {
+		avgExecTimeMs = totalExecTimeMs / len(problem.TestCases)
+	}
 
 	finalResult := store.SubmissionResult{
-		Status:          finalStatus,
-		ExecutionTimeMs: avgExecTimeMs,
-		MemoryUsedKb:    maxMemoryUsedKb,
+		Status:        finalStatus,
+		ExecutionTime: avgExecTimeMs,
+		MemoryUsed:    maxMemoryUsedKb,
 	}
 	log.Printf("Finalizing submission %s with status: %s, Avg Time: %dms, Max Memory: %dKB", payload.SubmissionID, finalStatus, avgExecTimeMs, maxMemoryUsedKb)
 	return s.UpdateSubmissionResult(ctx, payload.SubmissionID, finalResult)

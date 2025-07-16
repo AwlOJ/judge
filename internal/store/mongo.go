@@ -22,34 +22,37 @@ const (
 	StatusCompilationError    = "Compilation Error"
 	StatusRuntimeError        = "Runtime Error"
 	StatusInternalError       = "Internal Error"
-	StatusCompleted           = "Completed" // Internal status for a successful run before comparison
+	StatusCompleted           = "Completed"
 )
 
 // --- Data Structures ---
 
-// TestCase defines the structure for a single test case.
+// TestCase matches the test case sub-document schema.
 type TestCase struct {
 	Input  string `bson:"input"`
 	Output string `bson:"output"`
 }
 
-// Problem holds all information about a single competitive programming problem.
+// Problem matches the 'problems' collection schema.
 type Problem struct {
-	ID            primitive.ObjectID `bson:"_id,omitempty"`
-	Title         string             `bson:"title"`
-	Description   string             `bson:"description"`
-	TimeLimitMs   int                `bson:"timeLimitMs"`
-	MemoryLimitMb int                `bson:"memoryLimitMb"`
-	TestCases     []TestCase         `bson:"testCases"`
+	ID          primitive.ObjectID `bson:"_id,omitempty"`
+	Title       string             `bson:"title"`
+	Description string             `bson:"description"`
+	TimeLimit   int                `bson:"timeLimit"`   // In seconds, as per your schema
+	MemoryLimit int                `bson:"memoryLimit"` // In megabytes
+	TestCases   []TestCase         `bson:"testCases"`
 }
 
-// Submission represents a user's code submission for a problem.
+// Submission matches the 'submissions' collection schema provided by you.
 type Submission struct {
-	ID         primitive.ObjectID `bson:"_id,omitempty"`
-	ProblemID  primitive.ObjectID `bson:"problemId"`
-	SourceCode string             `bson:"sourceCode"`
-	Language   string             `bson:"language"`
-	Status     string             `bson:"status"`
+	ID        primitive.ObjectID `bson:"_id,omitempty"`
+	UserID    primitive.ObjectID `bson:"userId"`
+	ProblemID primitive.ObjectID `bson:"problemId"`
+	Code      string             `bson:"code"` // MATCHES YOUR SCHEMA
+	Language  string             `bson:"language"`
+	Status    string             `bson:"status"`
+	CreatedAt time.Time          `bson:"createdAt"`
+	UpdatedAt time.Time          `bson:"updatedAt"`
 }
 
 // --- Payloads and Results ---
@@ -68,14 +71,15 @@ type ExecutionResult struct {
 	MemoryUsedKb    uint64
 }
 
-// SubmissionResult is the final result to be stored in the database.
+// SubmissionResult is used to update the database with the final outcome.
+// The BSON tags here match the fields in your original schema.
 type SubmissionResult struct {
-	Status          string `bson:"status"`
-	ExecutionTimeMs int    `bson:"executionTimeMs,omitempty"`
-	MemoryUsedKb    uint64 `bson:"memoryUsedKb,omitempty"`
-	CompileOutput   string `bson:"compileOutput,omitempty"`
+	Status        string    `bson:"status"`
+	ExecutionTime int       `bson:"executionTime,omitempty"`
+	MemoryUsed    uint64    `bson:"memoryUsed,omitempty"`
+	CompileOutput string    `bson:"compileOutput,omitempty"`
+	UpdatedAt     time.Time `bson:"updatedAt"`
 }
-
 
 // MongoStore holds the database connection.
 type MongoStore struct {
@@ -149,6 +153,7 @@ func (s *MongoStore) UpdateSubmissionResult(ctx context.Context, id string, resu
 	if err != nil {
 		return fmt.Errorf("invalid submission ID format: %w", err)
 	}
+	result.UpdatedAt = time.Now()
 	_, err = s.db.Collection("submissions").UpdateOne(
 		ctx,
 		bson.M{"_id": objID},

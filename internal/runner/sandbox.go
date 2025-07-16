@@ -1,3 +1,5 @@
+//go:build linux
+
 package runner
 
 import (
@@ -16,13 +18,11 @@ import (
 	"judge-service/internal/store"
 )
 
-// Runner encapsulates the logic for running code.
 type Runner struct {
 	Ctx        context.Context
 	LangConfig map[string]config.Language
 }
 
-// NewRunner creates a new runner instance.
 func NewRunner(ctx context.Context, langConfig map[string]config.Language) *Runner {
 	return &Runner{
 		Ctx:        ctx,
@@ -30,7 +30,6 @@ func NewRunner(ctx context.Context, langConfig map[string]config.Language) *Runn
 	}
 }
 
-// Execute runs the compiled code directly, reporting CPU time for accuracy.
 func (r *Runner) Execute(executablePath string, testCase store.TestCase, timeLimitMs int, memoryLimitMb int) (result store.ExecutionResult) {
 	log.Printf("Executing %s with time limit %dms (wall-clock), memory limit %dMB", executablePath, timeLimitMs, memoryLimitMb)
 
@@ -96,7 +95,6 @@ func (r *Runner) Execute(executablePath string, testCase store.TestCase, timeLim
 	return result
 }
 
-// PrepareEnvironment creates a temporary directory and writes the source code file.
 func (r *Runner) PrepareEnvironment(submissionID string, sourceCode string, lang string) (tempDir string, err error) {
 	config, ok := r.LangConfig[lang]
 	if !ok {
@@ -116,7 +114,6 @@ func (r *Runner) PrepareEnvironment(submissionID string, sourceCode string, lang
 	return tempDir, nil
 }
 
-// Compile translates source code into an executable file.
 func (r *Runner) Compile(tempDir string, lang string) (executablePath string, compileOutput string, err error) {
 	config, ok := r.LangConfig[lang]
 	if !ok {
@@ -126,7 +123,7 @@ func (r *Runner) Compile(tempDir string, lang string) (executablePath string, co
 	if config.CompileCmd == "" {
 		return filepath.Join(tempDir, config.SourceFileName), "", nil
 	}
-	
+
 	ctx, cancel := context.WithTimeout(r.Ctx, 30*time.Second)
 	defer cancel()
 
@@ -142,7 +139,6 @@ func (r *Runner) Compile(tempDir string, lang string) (executablePath string, co
 	return filepath.Join(tempDir, config.ExecutableFileName), "", nil
 }
 
-// CleanUp removes the temporary directory.
 func (r *Runner) CleanUp(tempDir string) {
 	if err := os.RemoveAll(tempDir); err != nil {
 		log.Printf("Warning: failed to clean up temp directory %s: %v", tempDir, err)
