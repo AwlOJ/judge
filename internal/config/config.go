@@ -7,19 +7,23 @@ import (
 
 // Config holds all configuration loaded from environment variables.
 type Config struct {
-	RedisURL       string
-	RedisQueueName string
-	MongoURI       string
-	MongoDBName    string
+	RedisURL          string
+	RedisQueueName    string
+	MongoURI          string
+	MongoDBName       string
+	InternalApiUrl    string // URL for the callback API
+	InternalApiSecret string // Secret for the callback API
 }
 
 // Load reads configuration from environment variables.
 func Load() (*Config, error) {
 	cfg := &Config{
-		RedisURL:       os.Getenv("REDIS_URL"),
-		RedisQueueName: os.Getenv("REDIS_QUEUE_NAME"),
-		MongoURI:       os.Getenv("MONGO_URI"),
-		MongoDBName:    os.Getenv("MONGO_DB_NAME"),
+		RedisURL:          os.Getenv("REDIS_URL"),
+		RedisQueueName:    os.Getenv("REDIS_QUEUE_NAME"),
+		MongoURI:          os.Getenv("MONGO_URI"),
+		MongoDBName:       os.Getenv("MONGO_DB_NAME"),
+		InternalApiUrl:    os.Getenv("INTERNAL_API_URL"),
+		InternalApiSecret: os.Getenv("INTERNAL_API_SECRET"),
 	}
 
 	if cfg.MongoURI == "" {
@@ -34,6 +38,12 @@ func Load() (*Config, error) {
 	if cfg.RedisQueueName == "" {
 		cfg.RedisQueueName = "submission_queue" // Default value
 	}
+	if cfg.InternalApiUrl == "" {
+		return nil, fmt.Errorf("INTERNAL_API_URL environment variable not set")
+	}
+	if cfg.InternalApiSecret == "" {
+		return nil, fmt.Errorf("INTERNAL_API_SECRET environment variable not set")
+	}
 
 	return cfg, nil
 }
@@ -46,20 +56,15 @@ type Language struct {
 	CompileCmd         string `json:"compileCmd,omitempty"`
 }
 
-// LoadLanguageConfig loads language definitions. For now, it's hardcoded.
-// In a real application, this could be loaded from a JSON file.
+// LoadLanguageConfig loads language definitions.
 func LoadLanguageConfig() (map[string]Language, error) {
 	languages := make(map[string]Language)
 	
-	// C++ Configuration
 	languages["cpp"] = Language{
 		SourceFileName:     "main.cpp",
 		ExecutableFileName: "main",
 		CompileCmd:         "g++ main.cpp -o main -O2 -std=c++17",
 	}
 	
-	// Add other languages here in the future
-	// languages["python"] = ...
-
 	return languages, nil
 }

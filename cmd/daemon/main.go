@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"judge-service/internal/callback"
 	"judge-service/internal/config"
 	"judge-service/internal/core"
 	"judge-service/internal/queue"
@@ -35,6 +36,9 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
+	// Initialize the new callback client
+	callbackClient := callback.NewClient(cfg.InternalApiUrl, cfg.InternalApiSecret)
+
 	consumer, err := queue.NewConsumer(cfg.RedisURL, cfg.RedisQueueName)
 	if err != nil {
 		log.Fatalf("Could not initialize queue consumer: %v", err)
@@ -59,7 +63,8 @@ func main() {
 	runnerInstance := runner.NewRunner(ctx, langConfig)
 
 	jobHandler := func(ctx context.Context, payload *store.SubmissionPayload) error {
-		return processJob(ctx, payload, storeInstance, runnerInstance)
+		// Pass the callback client to the job processor
+		return processJob(ctx, payload, storeInstance, runnerInstance, callbackClient)
 	}
 
 	go consumer.Start(ctx, jobHandler)
@@ -72,7 +77,7 @@ func main() {
 	log.Println("Judge daemon stopped.")
 }
 
-func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.MongoStore, r *runner.Runner) error {
+func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.MongoStore, r *runner.Runner, cb *callback.Client) error {
 	log.Printf("Processing submission ID: %s", payload.SubmissionID)
 
 	var tempDir string
@@ -82,6 +87,7 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 		}
 	}()
 
+	// The judge service still updates the status to "Judging"
 	err := s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusJudging)
 	if err != nil {
 		log.Printf("Failed to update submission %s status to Judging: %v", payload.SubmissionID, err)
@@ -90,30 +96,31 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 	submission, err := s.GetSubmission(ctx, payload.SubmissionID)
 	if err != nil {
 		log.Printf("Error fetching submission %s: %v", payload.SubmissionID, err)
-		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusInternalError)
+		// No need to update status here, let the API server handle it if it times out
+		return err
 	}
 
 	problem, err := s.GetProblem(ctx, submission.ProblemID)
 	if err != nil {
 		log.Printf("Error fetching problem %s for submission %s: %v", submission.ProblemID, payload.SubmissionID, err)
-		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusInternalError)
+		return err
 	}
 
-	// FIX: Use the correct field 'submission.Code'
 	tempDir, err = r.PrepareEnvironment(payload.SubmissionID, submission.Code, submission.Language)
 	if err != nil {
 		log.Printf("Error preparing environment for %s: %v", payload.SubmissionID, err)
-		return s.UpdateSubmissionStatus(ctx, payload.SubmissionID, store.StatusInternalError)
+		result := store.SubmissionResult{Status: store.StatusInternalError}
+		return cb.SendResult(payload.SubmissionID, result)
 	}
 
 	executablePath, compileOutput, err := r.Compile(tempDir, submission.Language)
 	if err != nil {
-		log.Printf("Compilation failed for %s. Compiler output: %s. Error: %v", payload.SubmissionID, compileOutput, err)
+		log.Printf("Compilation failed for %s. Compiler output: %s", payload.SubmissionID, compileOutput)
 		result := store.SubmissionResult{
 			Status:        store.StatusCompilationError,
 			CompileOutput: compileOutput,
 		}
-		return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
+		return cb.SendResult(payload.SubmissionID, result)
 	}
 
 	var finalStatus = store.StatusAccepted
@@ -122,10 +129,8 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 
 	for i, testCase := range problem.TestCases {
 		log.Printf("Running test case %d for submission %s...", i+1, payload.SubmissionID)
-
-		// FIX: Convert time limit from seconds to milliseconds
+		
 		timeLimitMs := problem.TimeLimit * 1000
-
 		execResult := r.Execute(executablePath, testCase, timeLimitMs, problem.MemoryLimit)
 
 		if execResult.MemoryUsedKb > maxMemoryUsedKb {
@@ -135,13 +140,13 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 
 		if execResult.Status != store.StatusCompleted {
 			finalStatus = execResult.Status
-			log.Printf("Submission %s - Test case %d failed with status: %s. Error: %s", payload.SubmissionID, i+1, finalStatus, execResult.Error)
+			log.Printf("Submission %s - Test case %d failed with status: %s", payload.SubmissionID, i+1, finalStatus)
 			result := store.SubmissionResult{
 				Status:        finalStatus,
 				ExecutionTime: execResult.ExecutionTimeMs,
 				MemoryUsed:    execResult.MemoryUsedKb,
 			}
-			return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
+			return cb.SendResult(payload.SubmissionID, result)
 		}
 
 		if !core.CompareOutputs(execResult.Output, testCase.Output) {
@@ -152,7 +157,7 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 				ExecutionTime: execResult.ExecutionTimeMs,
 				MemoryUsed:    maxMemoryUsedKb,
 			}
-			return s.UpdateSubmissionResult(ctx, payload.SubmissionID, result)
+			return cb.SendResult(payload.SubmissionID, result)
 		}
 		log.Printf("Submission %s - Test case %d: Passed", payload.SubmissionID, i+1)
 	}
@@ -167,6 +172,6 @@ func processJob(ctx context.Context, payload *store.SubmissionPayload, s *store.
 		ExecutionTime: avgExecTimeMs,
 		MemoryUsed:    maxMemoryUsedKb,
 	}
-	log.Printf("Finalizing submission %s with status: %s, Avg Time: %dms, Max Memory: %dKB", payload.SubmissionID, finalStatus, avgExecTimeMs, maxMemoryUsedKb)
-	return s.UpdateSubmissionResult(ctx, payload.SubmissionID, finalResult)
+	log.Printf("Finalizing submission %s with status: %s. Sending to callback.", payload.SubmissionID, finalStatus)
+	return cb.SendResult(payload.SubmissionID, finalResult)
 }
